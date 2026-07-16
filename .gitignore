@@ -1,0 +1,28 @@
+node_modules/
+main.js
+*.map
+*.log
+dist/
+build/
+coverage/
+.test/
+
+# Obsidian/runtime state
+data.json
+data.json.*
+.sync-request.json
+calendar-kanban-sync.json
+overdue-snapshot.json
+recurrence-session.json
+recurrence-create-state.json
+
+# Local credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+.DS_Store

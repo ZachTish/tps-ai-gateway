@@ -1,0 +1,22 @@
+.tps-collapsible-section {
+  margin: 12px 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  background: var(--background-secondary);
+}
+
+.tps-collapsible-section-summary {
+  cursor: pointer;
+  padding: 12px 14px;
+  font-weight: var(--font-semibold);
+}
+
+.tps-collapsible-section-description {
+  margin: 0;
+  padding: 0 14px 10px;
+  color: var(--text-muted);
+}
+
+.tps-collapsible-section-content {
+  padding: 0 14px 10px;
+}
