@@ -1,7 +1,11 @@
 import esbuild from "esbuild";
 import process from "process";
 import builtins from "builtin-modules";
+import { basename, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { runtimeDeployPlugin } from "../deploy-runtime.mjs";
+
+const sourceFolder = basename(dirname(fileURLToPath(import.meta.url)));
 
 const context = await esbuild.context({
   entryPoints: ["src/main.ts"],
@@ -14,7 +18,7 @@ const context = await esbuild.context({
   treeShaking: true,
   outfile: "main.js",
   minify: process.argv[2] === "production",
-  plugins: [runtimeDeployPlugin("tps-ai-gateway")],
+  plugins: [runtimeDeployPlugin(sourceFolder)],
 });
 if (process.argv[2] === "production") {
   await context.rebuild();
