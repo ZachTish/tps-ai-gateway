@@ -107,7 +107,7 @@ test("gateway routes user-device work through a durable Controller queue", () =>
   assert.match(main, /Sent to the Controller\. This can take a few minutes\./);
 });
 
-test("remote queue validates jobs, reclaims stale work, and expires retained results", () => {
+test("remote queue validates jobs and reclaims stale processing work", () => {
   const now = Date.now();
   const job = {
     version: 1,
@@ -122,8 +122,32 @@ test("remote queue validates jobs, reclaims stale work, and expires retained res
   };
   assert.equal(parseRemoteAiJob(JSON.stringify(job))?.id, "job-1");
   assert.equal(remoteAiJobIsClaimable(job, now), true);
+  assert.equal(remoteAiJobIsClaimable({ ...job, status: "processing" }, now), true);
+  assert.equal(remoteAiJobIsClaimable({ ...job, status: "processing", startedAt: "not-a-date" }, now), true);
   assert.equal(remoteAiJobIsClaimable({ ...job, status: "processing", startedAt: new Date(now - 11 * 60 * 1000).toISOString() }, now), true);
   assert.equal(remoteAiJobIsClaimable({ ...job, status: "processing", startedAt: new Date(now).toISOString() }, now), false);
-  assert.equal(remoteAiJobIsExpired({ ...job, status: "complete", updatedAt: new Date(now - 49 * 60 * 60 * 1000).toISOString() }, now), true);
   assert.equal(remoteAiJobPath("job / unsafe"), "_assets/TPS AI Queue/job-unsafe.md");
+});
+
+test("remote queue retention expires only terminal results", () => {
+  const now = Date.now();
+  const old = new Date(now - 49 * 60 * 60 * 1000).toISOString();
+  const recent = new Date(now - 47 * 60 * 60 * 1000).toISOString();
+  const job = {
+    version: 1,
+    id: "job-1",
+    taskId: "health.describe-food.extract",
+    requesterDeviceId: "phone",
+    createdAt: old,
+    updatedAt: old,
+    status: "pending",
+    messages: [{ role: "user", content: "one piece salmon sashimi" }],
+    schema: { type: "object" },
+  };
+  assert.equal(remoteAiJobIsExpired(job, now), false);
+  assert.equal(remoteAiJobIsExpired({ ...job, status: "processing", startedAt: old }, now), false);
+  assert.equal(remoteAiJobIsExpired({ ...job, status: "complete" }, now), true);
+  assert.equal(remoteAiJobIsExpired({ ...job, status: "failed" }, now), true);
+  assert.equal(remoteAiJobIsExpired({ ...job, status: "complete", updatedAt: recent }, now), false);
+  assert.equal(remoteAiJobIsExpired({ ...job, status: "failed", updatedAt: "not-a-date" }, now), false);
 });

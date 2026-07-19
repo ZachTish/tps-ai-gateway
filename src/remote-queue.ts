@@ -41,12 +41,14 @@ export function parseRemoteAiJob(value: string): RemoteAiJob | null {
 
 export function remoteAiJobIsClaimable(job: RemoteAiJob, now = Date.now()): boolean {
   if (job.status === "pending") return true;
-  if (job.status !== "processing" || !job.startedAt) return false;
+  if (job.status !== "processing") return false;
+  if (!job.startedAt) return true;
   const startedAt = Date.parse(job.startedAt);
   return !Number.isFinite(startedAt) || now - startedAt >= REMOTE_AI_CLAIM_TIMEOUT_MS;
 }
 
 export function remoteAiJobIsExpired(job: RemoteAiJob, now = Date.now()): boolean {
+  if (job.status !== "complete" && job.status !== "failed") return false;
   const updatedAt = Date.parse(job.updatedAt);
   return Number.isFinite(updatedAt) && now - updatedAt >= REMOTE_AI_RETENTION_MS;
 }
