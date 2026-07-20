@@ -1,4 +1,6 @@
-export type AiProviderId = "ollama" | "openai" | "gemini";
+import type { TPSAiProviderId } from "./tps-ai-gateway-contract";
+
+export type AiProviderId = TPSAiProviderId;
 
 export interface AiGatewaySettings {
   settingsVersion: number;
@@ -18,65 +20,14 @@ export interface AiProviderCredentials {
   geminiApiKey: string;
 }
 
-export interface AiMessage {
-  role: "system" | "user" | "assistant";
-  content: string;
-}
-
-export interface StructuredRequest {
-  taskId: string;
-  messages: AiMessage[];
-  schema: Record<string, unknown>;
-  preferredProviders?: AiProviderId[];
-  metadata?: Record<string, string | number | boolean>;
-}
-
-export interface StructuredResult<T> {
-  data: T;
-  provider: AiProviderId;
-  model: string;
-  traceId: string;
-  attempts: number;
-}
-
-export interface DecisionOption<T = unknown> {
-  id: string;
-  label: string;
-  description?: string;
-  value?: T;
-}
-
-export interface DecisionResult<T = unknown> extends StructuredResult<{ optionId: string; reason: string }> {
-  option: DecisionOption<T>;
-}
-
-export interface CapabilityContext {
-  sourcePluginId: string;
-  traceId: string;
-  confirmed: boolean;
-}
-
-export interface GatewayCapability<TInput = unknown, TOutput = unknown> {
-  id: string;
-  ownerPluginId: string;
-  description: string;
-  inputSchema: Record<string, unknown>;
-  requiresConfirmation?: boolean;
-  execute: (input: TInput, context: CapabilityContext) => Promise<TOutput>;
-}
-
-export interface CapabilityProposal<TInput = unknown> {
-  capabilityId: string;
-  input: TInput;
-  reason: string;
-  traceId: string;
-}
-
-export interface TpsAiGatewayApi {
-  completeStructured<T>(request: StructuredRequest): Promise<StructuredResult<T>>;
-  choose<T>(request: Omit<StructuredRequest, "schema"> & { options: DecisionOption<T>[] }): Promise<DecisionResult<T>>;
-  registerCapability<TInput, TOutput>(capability: GatewayCapability<TInput, TOutput>): () => void;
-  listCapabilities(): Array<Pick<GatewayCapability, "id" | "ownerPluginId" | "description" | "inputSchema" | "requiresConfirmation">>;
-  proposeCapability<TInput>(request: Omit<StructuredRequest, "schema"> & { capabilityIds: string[] }): Promise<CapabilityProposal<TInput>>;
-  executeCapability<TOutput>(proposal: CapabilityProposal, context: Omit<CapabilityContext, "traceId">): Promise<TOutput>;
-}
+export type {
+  TPSAiGatewayMessage as AiMessage,
+  TPSAiGatewayStructuredRequest as StructuredRequest,
+  TPSAiGatewayStructuredResult as StructuredResult,
+  TPSAiGatewayDecisionOption as DecisionOption,
+  TPSAiGatewayDecisionResult as DecisionResult,
+  TPSAiGatewayCapabilityContext as CapabilityContext,
+  TPSAiGatewayCapability as GatewayCapability,
+  TPSAiGatewayCapabilityProposal as CapabilityProposal,
+  TPSAiGatewayApi as TpsAiGatewayApi,
+} from "./tps-ai-gateway-contract";

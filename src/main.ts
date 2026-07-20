@@ -1,4 +1,4 @@
-import { App, Notice, Plugin, PluginSettingTab, SecretComponent, Setting, TFile, TFolder } from "obsidian";
+import { App, Events, Notice, Plugin, PluginSettingTab, SecretComponent, Setting, TFile, TFolder } from "obsidian";
 import { callProvider } from "./providers";
 import { withProviderTimeout } from "./provider-timeout";
 import { assertSchema } from "./schema";
@@ -26,33 +26,38 @@ import {
 } from "./remote-queue";
 import { TPSNotifierClient } from "./tps-notifier-client";
 import type { TPSNotifierConsumerDeliveryResult } from "./tps-notifier-contract";
-import type { AiGatewaySettings, AiProviderId, CapabilityContext, CapabilityProposal, DecisionOption, DecisionResult, GatewayCapability, StructuredRequest, StructuredResult, TpsAiGatewayApi } from "./types";
+import {
+  parseTPSAiGatewayServiceRequest,
+  TPS_AI_GATEWAY_API_CAPABILITIES,
+  TPS_AI_GATEWAY_API_VERSION,
+  TPS_AI_GATEWAY_PROVIDER_PLUGIN_ID,
+  TPS_AI_GATEWAY_SERVICE_EVENTS,
+  TPS_AI_GATEWAY_SERVICE_PROTOCOL_VERSION,
+  type TPSAiGatewayApi,
+  type TPSAiGatewayServiceDescriptor,
+} from "./tps-ai-gateway-contract";
+import type { AiGatewaySettings, AiProviderId, CapabilityContext, CapabilityProposal, DecisionOption, DecisionResult, GatewayCapability, StructuredRequest, StructuredResult } from "./types";
 
 export default class TpsAiGatewayPlugin extends Plugin {
   settings: AiGatewaySettings = DEFAULT_SETTINGS;
-  api!: TpsAiGatewayApi;
+  api!: Readonly<TPSAiGatewayApi>;
   private capabilities = new Map<string, GatewayCapability>();
   private saveInFlight: Promise<void> | null = null;
   private saveQueued = false;
   private lifecycleEpoch = 0;
+  private lifecycleState: "idle" | "loading" | "ready" | "unloaded" = "idle";
+  private serviceDescriptor?: Readonly<TPSAiGatewayServiceDescriptor>;
   private remoteQueueScanEpoch: number | null = null;
   private remoteQueueScanTimer: number | null = null;
   private notifierClient?: TPSNotifierClient<TFile>;
 
   async onload(): Promise<void> {
     const loadEpoch = ++this.lifecycleEpoch;
+    this.lifecycleState = "loading";
     await this.loadSettings();
     if (loadEpoch !== this.lifecycleEpoch) return;
-    this.api = {
-      completeStructured: <T>(request: StructuredRequest) => this.completeStructured<T>(request),
-      choose: <T>(request: Omit<StructuredRequest, "schema"> & { options: DecisionOption<T>[] }) => this.choose<T>(request),
-      registerCapability: <TInput, TOutput>(capability: GatewayCapability<TInput, TOutput>) => this.registerCapability(capability as GatewayCapability),
-      listCapabilities: () => this.listCapabilities(),
-      proposeCapability: <TInput>(request: Omit<StructuredRequest, "schema"> & { capabilityIds: string[] }) => this.proposeCapability<TInput>(request),
-      executeCapability: <TOutput>(proposal: CapabilityProposal, context: Omit<CapabilityContext, "traceId">) => this.executeCapability<TOutput>(proposal, context),
-    };
+    this.api = this.createPublicApi(loadEpoch);
     (this as any).api = this.api;
-    (this.app as any).tpsAiGateway = this.api;
     this.notifierClient = new TPSNotifierClient<TFile>(this.app, this.manifest.id);
     this.notifierClient.start((eventRef) => this.registerEvent(eventRef));
     this.addSettingTab(new AiGatewaySettingTab(this.app, this));
@@ -65,18 +70,117 @@ export default class TpsAiGatewayPlugin extends Plugin {
     }));
     this.registerInterval(window.setInterval(() => this.scheduleRemoteQueueScan("interval"), 30_000));
     this.app.workspace.onLayoutReady(() => this.scheduleRemoteQueueScan("startup"));
+    this.lifecycleState = "ready";
+    this.publishApiService(loadEpoch);
     logger.flow("Plugin", "load", { providers: this.settings.providerOrder, ollamaEnabled: this.settings.ollamaEnabled });
   }
 
   onunload(): void {
+    const descriptor = this.serviceDescriptor;
+    this.lifecycleState = "unloaded";
     this.lifecycleEpoch += 1;
+    this.serviceDescriptor = undefined;
+    this.announceServiceUnavailable(descriptor);
     if (this.remoteQueueScanTimer !== null) window.clearTimeout(this.remoteQueueScanTimer);
     this.remoteQueueScanTimer = null;
     this.notifierClient?.dispose();
     this.notifierClient = undefined;
-    if ((this.app as any).tpsAiGateway === this.api) delete (this.app as any).tpsAiGateway;
     this.capabilities.clear();
     delete (this as any).api;
+  }
+
+  private createPublicApi(loadEpoch: number): Readonly<TPSAiGatewayApi> {
+    let api: Readonly<TPSAiGatewayApi>;
+    const assertCurrentApi = (): void => {
+      if (loadEpoch !== this.lifecycleEpoch
+        || this.lifecycleState !== "ready"
+        || this.api !== api) {
+        const error = new Error("TPS AI Gateway API is no longer available.") as Error & { code: "not-ready" };
+        error.code = "not-ready";
+        throw error;
+      }
+    };
+    const invokeAsync = async <T>(operation: () => Promise<T>): Promise<T> => {
+      assertCurrentApi();
+      const result = await operation();
+      assertCurrentApi();
+      return result;
+    };
+    api = Object.freeze({
+      apiVersion: TPS_AI_GATEWAY_API_VERSION,
+      capabilities: TPS_AI_GATEWAY_API_CAPABILITIES,
+      completeStructured: <T>(request: StructuredRequest) => (
+        invokeAsync(() => this.completeStructured<T>(request))
+      ),
+      choose: <T>(request: Omit<StructuredRequest, "schema"> & { options: DecisionOption<T>[] }) => (
+        invokeAsync(() => this.choose<T>(request))
+      ),
+      registerCapability: <TInput, TOutput>(capability: GatewayCapability<TInput, TOutput>) => {
+        assertCurrentApi();
+        const unregister = this.registerCapability(capability as GatewayCapability);
+        let active = true;
+        return () => {
+          if (!active) return;
+          active = false;
+          if (loadEpoch !== this.lifecycleEpoch || this.api !== api) return;
+          unregister();
+        };
+      },
+      listCapabilities: () => {
+        assertCurrentApi();
+        return this.listCapabilities();
+      },
+      proposeCapability: <TInput>(request: Omit<StructuredRequest, "schema"> & { capabilityIds: string[] }) => (
+        invokeAsync(() => this.proposeCapability<TInput>(request))
+      ),
+      executeCapability: <TOutput>(
+        proposal: CapabilityProposal,
+        context: Omit<CapabilityContext, "traceId">,
+      ) => invokeAsync(() => this.executeCapability<TOutput>(proposal, context)),
+    });
+    return api;
+  }
+
+  private publishApiService(loadEpoch: number): void {
+    const api = this.api;
+    if (!api || loadEpoch !== this.lifecycleEpoch || this.lifecycleState !== "ready") return;
+    const descriptor = Object.freeze({
+      protocolVersion: TPS_AI_GATEWAY_SERVICE_PROTOCOL_VERSION,
+      providerPluginId: TPS_AI_GATEWAY_PROVIDER_PLUGIN_ID,
+      api,
+    }) as Readonly<TPSAiGatewayServiceDescriptor>;
+    this.serviceDescriptor = descriptor;
+    this.registerEvent((this.app.workspace as Events).on(TPS_AI_GATEWAY_SERVICE_EVENTS.REQUEST, (...args: unknown[]) => {
+      try {
+        if (loadEpoch !== this.lifecycleEpoch
+          || this.lifecycleState !== "ready"
+          || this.serviceDescriptor !== descriptor) return;
+        const request = parseTPSAiGatewayServiceRequest(args[0]);
+        if (!request
+          || loadEpoch !== this.lifecycleEpoch
+          || this.lifecycleState !== "ready"
+          || this.serviceDescriptor !== descriptor) return;
+        request.accept(descriptor);
+      } catch {
+        logger.warn("ApiService", "request:consumer-rejected", { accepted: false });
+      }
+    }));
+    try {
+      this.app.workspace.trigger(TPS_AI_GATEWAY_SERVICE_EVENTS.AVAILABLE, descriptor);
+    } catch {
+      logger.warn("ApiService", "available:consumer-failed", { serviceStillAvailable: true });
+    }
+  }
+
+  private announceServiceUnavailable(
+    descriptor: Readonly<TPSAiGatewayServiceDescriptor> | undefined,
+  ): void {
+    if (!descriptor) return;
+    try {
+      this.app.workspace.trigger(TPS_AI_GATEWAY_SERVICE_EVENTS.UNAVAILABLE, descriptor);
+    } catch {
+      logger.warn("ApiService", "unavailable:consumer-failed", { serviceUnavailable: true });
+    }
   }
 
   private async completeStructured<T>(request: StructuredRequest): Promise<StructuredResult<T>> {

@@ -5,7 +5,7 @@
   "main": "main.js",
   "scripts": {
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
-    "test": "node --test scripts/test-notifier-client.mjs && node --test scripts/test-remote-notification.mjs && node --test scripts/test-gateway.mjs && npm run build"
+    "test": "node --test scripts/test-ai-gateway-contract.mjs && node --test scripts/test-ai-gateway-client.mjs && node --test scripts/test-ai-gateway-service.mjs && node --test scripts/test-notifier-client.mjs && node --test scripts/test-remote-notification.mjs && node --test scripts/test-gateway.mjs && npm run build"
   },
   "license": "MIT",
   "devDependencies": {

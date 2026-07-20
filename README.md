@@ -8,6 +8,7 @@ Canonical source, tests, Git metadata, and dependency links live in this test va
 - 2026-07-19 optimization validation: all 9 declared tests passed, including terminal-only queue-retention coverage. The required separate `npm run build` reported `[runtime-deploy] target=none lane=optimization`; no vault runtime was deployed, so reload and UI verification were not applicable. No version, tag, release, or production promotion was created.
 - 2026-07-19 phase-2 optimization validation: all 30 declared tests passed, including executable Notifier-client lifecycle, consumer-deadline, strict queue-schema, local atomic-claim, and completion-notification settlement tests. The required separate `npm run build` reported `[runtime-deploy] target=none lane=optimization`; no vault runtime was deployed, so reload and UI verification were not applicable. No version, tag, release, or production promotion was created.
 - 2026-07-19 queue-hardening validation: all 35 declared tests, the complete `npm test` suite and embedded production-mode build, and the required separate `npm run build` passed. Both builds reported `[runtime-deploy] target=none lane=optimization`; no vault runtime was deployed, so reload and UI verification were not applicable. No version, tag, release, or production promotion was created.
+- 2026-07-19 phase-3 discovery validation: all 57 declared tests passed, including executable hostile-boundary contract parsing, provider-first and consumer-first discovery, delayed callback rejection, exact lifecycle withdrawal, interrupted load, same-instance reload, and stale-API fencing. The full `npm test` suite's embedded production-mode build and the required separate final `npm run build` both reported `[runtime-deploy] target=none lane=optimization`; no vault runtime was deployed, so reload and UI verification were not applicable. No version, tag, release, or production promotion was created.
 
 ## Install with BRAT
 
@@ -40,7 +41,7 @@ Completion notification tracking is an optional, backward-compatible field on re
 
 The requesting call polls for twenty minutes. If that wait ends or Obsidian restarts, the original in-memory workflow cannot resume automatically; there is no persistent continuation or result-inbox API in this phase. When completion notification is enabled, a later notification therefore tells the user to run the originating action again. The completed queue file remains available for a future explicit result-recovery design.
 
-These transitions serialize claim and settlement within one local Obsidian vault instance. Obsidian Sync is not a distributed compare-and-set service, so two Controller devices editing divergent synced copies can still both execute a job before conflict resolution. Provider execution also lacks a stable cross-device idempotency key. For that reason this phase is crash-aware and duplicate-resistant locally, not an exactly-once distributed queue. The existing private Controller-role lookup and `app.tpsAiGateway` compatibility exposure also remain temporary unsupported integration points; replacing them requires a separate public Controller capability/discovery contract.
+These transitions serialize claim and settlement within one local Obsidian vault instance. Obsidian Sync is not a distributed compare-and-set service, so two Controller devices editing divergent synced copies can still both execute a job before conflict resolution. Provider execution also lacks a stable cross-device idempotency key. For that reason this phase is crash-aware and duplicate-resistant locally, not an exactly-once distributed queue. The private Controller-role lookup remains a temporary unsupported integration point; replacing it requires a separate public Controller capability/discovery contract.
 
 Notifier v2 discovery uses supported workspace request/available/unavailable events and validates the public API contract. Exact API identity prevents a stale unavailable event from clearing a newer service. A single isolated `app.plugins.getPlugin()` adapter remains temporarily for mixed-version Notifier v1 devices; a v2 occurrence never falls through to v1 after an ambiguous or rejected result. The v1 promise can establish only `legacy-accepted`, not a structured provider receipt, and a v1 rejection is recorded as `unknown`.
 
@@ -48,7 +49,9 @@ Ollama defaults to Mac loopback and therefore is not a mobile provider. Mobile u
 
 ## Public API
 
-The API is available as the enabled plugin's `api` and as `app.tpsAiGateway`:
+TPS plugins discover the Gateway through the public Workspace service events `tps:ai-gateway-api-request`, `tps:ai-gateway-api-available`, and `tps:ai-gateway-api-unavailable`. Protocol version 1 publishes a frozen descriptor for provider `tps-ai-gateway`; API version 1 advertises structured completion, guarded decision selection, and guarded capability execution. `TPSAiGatewayClient.start(registerEvent, onAvailabilityChanged?)` supports provider-first and consumer-first load order, `getApi()` synchronously requests the current descriptor, and `dispose()` invalidates the client lifecycle. It intentionally never reads `app.plugins` or an App-object alias.
+
+The provider retains its ordinary plugin-instance `api` property only as a compatibility surface during consumer migration. `app.tpsAiGateway` is no longer published. Consumers should use the Workspace client and these API methods:
 
 - `completeStructured<T>(request)`
 - `choose<T>(request)`
@@ -58,6 +61,10 @@ The API is available as the enabled plugin's `api` and as `app.tpsAiGateway`:
 - `executeCapability(proposal, context)`
 
 Every request requires a stable `taskId`, messages, and a response schema. Results include provider, model, trace ID, and attempt count for concise diagnostics.
+
+Each load creates a new frozen API and descriptor identity. Unload marks that API unavailable before broadcasting the exact descriptor withdrawal. Every cached API method checks the provider load epoch, readiness state, and API identity before doing work; asynchronous calls check again before returning. A stale capability-unregister callback is inert against a newer provider lifecycle, while stale API calls fail with `code: "not-ready"`.
+
+Workspace events provide a supported discovery transport and strong accidental-misconfiguration boundaries, but they do not authenticate the plugin that emitted an event. The contract validates protocol, provider ID, API version, capabilities, and required methods; a malicious installed plugin still runs with the same local Obsidian process authority.
 
 ## Safety and extensibility
 
@@ -73,6 +80,9 @@ Capability handlers are registered at runtime and removed when their owner unloa
 - Plaintext-key-to-SecretStorage migration and non-overwrite tests
 - Non-destructive terminal retention and valid-stale-claim tests
 - Notifier v2 event handshake, stale-service identity, v1 compatibility, no-same-occurrence fallback, and hostile-object fail-closed tests
+- AI Gateway contract snapshotting, receiver binding, hostile-object parsing, and bounded request tests
+- AI Gateway provider-first/consumer-first discovery, delayed-acceptance fencing, stale-withdrawal identity, callback isolation, and no-private-fallback client tests
+- Executable provider publication, exact withdrawal, interrupted-load, same-instance reload, reentrant-unload, and stale-method lifecycle tests
 - Raw-file, aggregate-message, schema-tree, and result-tree budget boundary tests
 - Strict remote-job parsing, fail-closed claim validation, local atomic claim arbitration, stale-owner rejection, and durable-process completion tests
 - Durable completion-notification migration, pre-send versus post-send interruption, exact-attempt settlement, suppression, and bounded outcome tests
@@ -80,6 +90,8 @@ Capability handlers are registered at runtime and removed when their owner unloa
 - TypeScript no-emit check plus embedded and separately invoked production-mode builds, both isolated with `target=none`
 
 ## Version notes
+
+- Unreleased optimization: Replaced the `app.tpsAiGateway` App-object monkeypatch with a frozen, versioned Workspace discovery service and a no-private-fallback canonical client. Cached provider APIs now fail closed after unload or reload.
 
 - 0.1.2: Bounded every provider attempt so fallback cannot hang indefinitely, moved Gemini authentication out of the URL, redacted credential-shaped provider failures before logging or display, reduced arbitrary request metadata to a field count in diagnostics, and aligned the manifest minimum with the Obsidian 1.12.0 SecretStorage contract.
 - 0.1.1: Moved cloud API credentials from plugin data into device-local Obsidian SecretStorage, with an automatic legacy migration that preserves an already populated secret instead of overwriting it.
