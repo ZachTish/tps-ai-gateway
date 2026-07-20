@@ -21,7 +21,7 @@ const { errorSummary, metadataSummary } = await import(`data:text/javascript;bas
 const timeoutModule = transformSync(timeoutSource, { loader: "ts", format: "esm", target: "es2020" }).code;
 const { withProviderTimeout } = await import(`data:text/javascript;base64,${Buffer.from(timeoutModule).toString("base64")}`);
 const remoteQueueModule = transformSync(remoteQueueSource, { loader: "ts", format: "esm", target: "es2020" }).code;
-const { parseRemoteAiJob, remoteAiJobIsClaimable, remoteAiJobIsExpired, remoteAiJobPath } = await import(`data:text/javascript;base64,${Buffer.from(remoteQueueModule).toString("base64")}`);
+const { parseRemoteAiJob, remoteAiJobIsClaimable, remoteAiJobPath } = await import(`data:text/javascript;base64,${Buffer.from(remoteQueueModule).toString("base64")}`);
 
 test("gateway validates nested structured values", () => {
   const schema = { type: "object", additionalProperties: false, required: ["items"], properties: { items: { type: "array", items: { type: "object", required: ["id"], properties: { id: { type: "string" } } } } } };
@@ -99,12 +99,54 @@ test("gateway separates proposals from guarded execution", () => {
 test("gateway routes user-device work through a durable Controller queue", () => {
   assert.match(main, /if \(!this\.isControllerDevice\(\)\) return this\.completeStructuredRemotely<T>\(request\)/);
   assert.match(main, /controller\?\.api\?\.isController\?\.\(\) === true/);
-  assert.match(main, /this\.app\.vault\.create\(path, JSON\.stringify\(job, null, 2\)\)/);
+  assert.match(main, /const serialized = this\.serializeRemoteJob\(job\)/);
+  assert.match(main, /remoteAiRequestPayloadIsWithinBudget\(job\)/);
+  assert.match(main, /this\.app\.vault\.create\(path, serialized\)/);
+  assert.match(main, /remoteAiJobFileSizeIsAllowed\(file\.stat\.size\)/);
   assert.match(main, /remoteAiJobIsClaimable\(job\)/);
-  assert.match(main, /this\.completeStructuredLocally\(\{ taskId: job\.taskId/);
-  assert.match(main, /notifier\?\.sendNotification/);
-  assert.match(main, /job\.metadata\?\.notifyOnCompletion === false/);
+  assert.match(main, /this\.completeStructuredLocally\(\{ taskId: claimed\.taskId/);
+  assert.match(main, /transitionRemoteAiJobFile\(this\.app\.vault, file/);
+  assert.match(main, /folder\.children\.filter/);
+  assert.match(main, /new TPSNotifierClient<TFile>\(this\.app, this\.manifest\.id\)/);
+  assert.match(main, /this\.notifierClient\?\.dispose\(\)/);
+  assert.match(main, /recoverRemoteAiNotificationState\(job\)/);
+  assert.match(main, /remoteAiJobWantsCompletionNotification\(ownedTerminal\)/);
   assert.match(main, /Sent to the Controller\. This can take a few minutes\./);
+});
+
+test("gateway atomically persists terminal ownership before I/O and CAS-settles afterward", () => {
+  const flow = main.slice(
+    main.indexOf("private async persistTerminalJobAndNotify"),
+    main.indexOf("private isControllerDevice"),
+  );
+  const persistAttempt = flow.indexOf("const transition = await transitionRemoteAiJobFile");
+  const begin = flow.indexOf("beginRemoteAiNotificationAttempt(ownedTerminal, attemptId)");
+  const send = flow.indexOf("this.notifierClient.send({ title, body })");
+  const settleTransition = flow.indexOf("const settlement = await transitionRemoteAiJobFile");
+  const settle = flow.indexOf("settleRemoteAiNotificationAttempt(current, attemptId, delivery)");
+  assert.ok(persistAttempt >= 0 && persistAttempt < begin);
+  assert.ok(begin < send);
+  assert.ok(send < settleTransition);
+  assert.ok(settleTransition < settle);
+  assert.doesNotMatch(flow, /vault\.(?:modify|read)\(/);
+  assert.doesNotMatch(flow, /getPlugin\?\.\("tps-messager"\)/);
+});
+
+test("gateway records a controlled pre-send interruption without guessing about post-send delivery", () => {
+  const flow = main.slice(
+    main.indexOf("private async persistTerminalJobAndNotify"),
+    main.indexOf("private async settleRemoteJobNotification"),
+  );
+  const beforeSend = flow.slice(
+    flow.indexOf('boundary: "before-send"'),
+    flow.indexOf("try {", flow.indexOf('boundary: "before-send"')),
+  );
+  const afterSendStart = flow.indexOf('boundary: "after-send"');
+  const afterSend = flow.slice(afterSendStart, flow.indexOf("return;", afterSendStart));
+  assert.match(beforeSend, /await this\.settleRemoteJobNotification/);
+  assert.match(beforeSend, /state: "not-attempted"/);
+  assert.match(beforeSend, /attempted: false/);
+  assert.doesNotMatch(afterSend, /settleRemoteJobNotification/);
 });
 
 test("remote queue validates jobs and reclaims stale processing work", () => {
@@ -122,32 +164,22 @@ test("remote queue validates jobs and reclaims stale processing work", () => {
   };
   assert.equal(parseRemoteAiJob(JSON.stringify(job))?.id, "job-1");
   assert.equal(remoteAiJobIsClaimable(job, now), true);
-  assert.equal(remoteAiJobIsClaimable({ ...job, status: "processing" }, now), true);
-  assert.equal(remoteAiJobIsClaimable({ ...job, status: "processing", startedAt: "not-a-date" }, now), true);
-  assert.equal(remoteAiJobIsClaimable({ ...job, status: "processing", startedAt: new Date(now - 11 * 60 * 1000).toISOString() }, now), true);
-  assert.equal(remoteAiJobIsClaimable({ ...job, status: "processing", startedAt: new Date(now).toISOString() }, now), false);
+  const processing = {
+    ...job,
+    status: "processing",
+    controllerDeviceId: "controller-one",
+    claimId: "claim-one",
+  };
+  assert.equal(remoteAiJobIsClaimable({ ...processing, startedAt: new Date(now - 11 * 60 * 1000).toISOString() }, now), true);
+  assert.equal(remoteAiJobIsClaimable({ ...processing, startedAt: new Date(now).toISOString() }, now), false);
+  assert.equal(remoteAiJobIsClaimable({ ...processing, claimId: undefined, startedAt: new Date(now - 11 * 60 * 1000).toISOString() }, now), false);
+  assert.equal(remoteAiJobIsClaimable({ ...processing, startedAt: "not-a-date" }, now), false);
   assert.equal(remoteAiJobPath("job / unsafe"), "_assets/TPS AI Queue/job-unsafe.md");
 });
 
-test("remote queue retention expires only terminal results", () => {
-  const now = Date.now();
-  const old = new Date(now - 49 * 60 * 60 * 1000).toISOString();
-  const recent = new Date(now - 47 * 60 * 60 * 1000).toISOString();
-  const job = {
-    version: 1,
-    id: "job-1",
-    taskId: "health.describe-food.extract",
-    requesterDeviceId: "phone",
-    createdAt: old,
-    updatedAt: old,
-    status: "pending",
-    messages: [{ role: "user", content: "one piece salmon sashimi" }],
-    schema: { type: "object" },
-  };
-  assert.equal(remoteAiJobIsExpired(job, now), false);
-  assert.equal(remoteAiJobIsExpired({ ...job, status: "processing", startedAt: old }, now), false);
-  assert.equal(remoteAiJobIsExpired({ ...job, status: "complete" }, now), true);
-  assert.equal(remoteAiJobIsExpired({ ...job, status: "failed" }, now), true);
-  assert.equal(remoteAiJobIsExpired({ ...job, status: "complete", updatedAt: recent }, now), false);
-  assert.equal(remoteAiJobIsExpired({ ...job, status: "failed", updatedAt: "not-a-date" }, now), false);
+test("remote queue keeps terminal files and describes late-result behavior truthfully", () => {
+  assert.doesNotMatch(main, /vault\.delete\(/);
+  assert.doesNotMatch(main, /remoteAiJobIsExpired/);
+  assert.match(main, /cannot resume automatically after the 20-minute wait/);
+  assert.match(main, /run that action again; it cannot resume automatically/);
 });
