@@ -1,5 +1,11 @@
 # TPS AI Gateway
 
+## 0.1.4
+
+- Settings persistence reloads the newest plugin data and merges only locally changed fields, preserving synchronized preferences and unknown/newer-schema fields.
+- Explicit provider subsets and intentionally empty text values survive reload. Rapid edits retain quick reverts, callers wait for durable state, a queued newer write supersedes an in-flight failure, and live edits made during I/O are reconciled safely.
+- This backward-compatible patch keeps the minimum supported Obsidian version at 1.12.0 and requires no manual migration.
+
 ## Development and deployment
 
 Canonical source, tests, Git metadata, and dependencies live in `/Users/zachtisherman/TishOS Plugin Development/tps-ai-gateway`, outside both vaults. `npm run build` and watch builds deploy byte-changed runtime artifacts by default only to `/Users/zachtisherman/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian Plugin Test Vault/.obsidian/plugins/tps-ai-gateway`; `npm test` is therefore isolated even though it ends with a production-mode build. Promotion to `/Users/zachtisherman/TishOS v0.1/.obsidian/plugins/tps-ai-gateway` is an explicit guarded post-validation action. Neither target overwrites `data.json` or other runtime-owned state.
@@ -8,7 +14,7 @@ Canonical source, tests, Git metadata, and dependencies live in `/Users/zachtish
 
 ## Install with BRAT
 
-Add the private repository `ZachTish/tps-ai-gateway` to BRAT and select **Latest** tracking so BRAT follows the newest GitHub release. For private-repository access, give BRAT a fine-grained GitHub token scoped to this repository with **Contents: Read-only** permission. Never commit the token to this repository, an Obsidian vault, or any synced note.
+Add the public repository `ZachTish/tps-ai-gateway` to BRAT and select **Latest** so BRAT follows numbered releases without a private-repository token. Freeze a numeric version when a device should remain pinned.
 
 TPS AI Gateway is the centralized model transport and guarded-decision layer for TPS plugins. It follows TPS Notifier's separation pattern: the gateway owns delivery mechanics and exposes a narrow API; domain plugins own domain rules and mutations.
 
@@ -30,6 +36,8 @@ Default order: local Ollama (`gemma3:12b`), OpenAI, then Gemini (`gemini-2.5-fla
 On TPS Controller devices, structured requests execute directly through that provider chain. On user-role devices, the gateway writes a versioned Markdown-backed JSON job to `_assets/TPS AI Queue`, using a file type that ordinary Obsidian Sync always carries. The Controller claims pending jobs, reclaims processing jobs whose claim is older than ten minutes, executes and schema-validates the request locally, writes the result or compact redacted failure back to the same job, and sends a TPS Notifier message without including prompt or response content. Callers may suppress intermediate-job notifications and provide a bounded friendly workflow title; all other jobs notify once by default. The requesting device polls the synced job for up to twenty minutes and then returns the ordinary structured result to its caller. Completed and failed jobs remain available for sync recovery for 48 hours before the Controller removes them. Queue files contain the request messages and schema inside the user's synced vault; they contain no provider credentials.
 
 Ollama defaults to Mac loopback and therefore is not a mobile provider. Mobile uses configured cloud fallbacks unless a separately secured Ollama endpoint is supplied. Do not expose a raw Ollama port to the internet; its local API does not authenticate requests.
+
+Settings saves are serialized and merge only locally edited fields into the newest synchronized plugin data. Explicit provider subsets and intentionally empty text fields remain as saved, unknown fields are preserved, and an older gateway never downgrades or rewrites a higher settings schema version.
 
 ## Public API
 

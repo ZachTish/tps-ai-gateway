@@ -2,7 +2,14 @@ import { App, Notice, Plugin, PluginSettingTab, SecretComponent, Setting, TFile 
 import { callProvider } from "./providers";
 import { withProviderTimeout } from "./provider-timeout";
 import { assertSchema } from "./schema";
-import { DEFAULT_SETTINGS, planLegacyApiKeyMigration, sanitizeSettings } from "./settings";
+import {
+  AiGatewaySettingsSaveCoordinator,
+  DEFAULT_SETTINGS,
+  createMigratedSettingsPayload,
+  planLegacyApiKeyMigration,
+  reconcilePersistedSettings,
+  sanitizeSettings,
+} from "./settings";
 import * as logger from "./logger";
 import { parseRemoteAiJob, remoteAiJobIsClaimable, remoteAiJobIsExpired, remoteAiJobPath, REMOTE_AI_QUEUE_FOLDER, REMOTE_AI_WAIT_TIMEOUT_MS, type RemoteAiJob } from "./remote-queue";
 import type { AiGatewaySettings, AiProviderId, CapabilityContext, CapabilityProposal, DecisionOption, DecisionResult, GatewayCapability, StructuredRequest, StructuredResult, TpsAiGatewayApi } from "./types";
@@ -11,8 +18,7 @@ export default class TpsAiGatewayPlugin extends Plugin {
   settings: AiGatewaySettings = DEFAULT_SETTINGS;
   api!: TpsAiGatewayApi;
   private capabilities = new Map<string, GatewayCapability>();
-  private saveInFlight: Promise<void> | null = null;
-  private saveQueued = false;
+  private settingsPersistence: AiGatewaySettingsSaveCoordinator | null = null;
   private remoteQueueScanInFlight = false;
   private remoteQueueScanTimer: number | null = null;
 
@@ -291,13 +297,24 @@ export default class TpsAiGatewayPlugin extends Plugin {
     logger.setLogging(this.settings.enableLogging);
     const migration = planLegacyApiKeyMigration(raw, this.settings, (name) => this.app.secretStorage.getSecret(name));
     for (const write of migration.writes) this.app.secretStorage.setSecret(write.secretName, write.value);
-    if (migration.shouldPersist) await this.saveData(this.settings);
+    if (migration.shouldPersist) {
+      const migrated = createMigratedSettingsPayload(raw, this.settings);
+      await this.saveData(migrated);
+      this.settings = sanitizeSettings(migrated);
+    }
+    this.settingsPersistence = new AiGatewaySettingsSaveCoordinator({
+      loadLatest: () => this.loadData(),
+      saveMerged: (value) => this.saveData(value),
+      onPersisted: (requested, persisted) => reconcilePersistedSettings(this.settings, requested, persisted),
+    }, this.settings);
     if (migration.writes.length) logger.flow("Settings", "legacy-api-keys-migrated", { providers: migration.writes.map((write) => write.provider) });
   }
   async saveSettings(): Promise<void> {
-    this.settings = sanitizeSettings(this.settings); logger.setLogging(this.settings.enableLogging);
-    if (this.saveInFlight) { this.saveQueued = true; await this.saveInFlight; return; }
-    do { this.saveQueued = false; this.saveInFlight = this.saveData(this.settings); try { await this.saveInFlight; } finally { this.saveInFlight = null; } } while (this.saveQueued);
+    this.settings = sanitizeSettings(this.settings);
+    logger.setLogging(this.settings.enableLogging);
+    const snapshot = sanitizeSettings(this.settings);
+    if (!this.settingsPersistence) throw new Error("AI gateway settings were not loaded.");
+    await this.settingsPersistence.request(snapshot);
   }
 
   private async validateProviderChain(): Promise<void> {
