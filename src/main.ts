@@ -330,34 +330,81 @@ export default class TpsAiGatewayPlugin extends Plugin {
 }
 
 class AiGatewaySettingTab extends PluginSettingTab {
+  private activeRoute: AiSettingsRoute = "cloud";
+
   constructor(app: App, private plugin: TpsAiGatewayPlugin) { super(app, plugin); }
+
   display(): void {
-    const { containerEl } = this; containerEl.empty(); containerEl.createEl("h2", { text: "TPS AI Gateway" });
+    this.renderSettings(false);
+  }
+
+  private renderSettings(focusPageHeading: boolean): void {
+    const { containerEl } = this;
+    containerEl.empty();
+    containerEl.createEl("h2", { text: "TPS AI Gateway" });
     containerEl.createEl("p", { text: "Central AI transport for TPS. Domain plugins retain ownership of actions and resource creation." });
-    const coreSettings = containerEl.createDiv({ cls: "tps-settings-core" });
-    new Setting(coreSettings).setName("Core cloud providers").setHeading();
-    secretReferenceSetting(coreSettings, this.plugin, "OpenAI API key", "Select or create a device-local Obsidian secret. API billing is separate from ChatGPT/Codex subscriptions.", "openAiApiKeySecret");
-    textSetting(coreSettings, this.plugin, "OpenAI model", "OpenAI structured-output model.", "openAiModel");
-    secretReferenceSetting(coreSettings, this.plugin, "Gemini API key", "Select or create a device-local Obsidian secret for the mobile-capable cloud fallback.", "geminiApiKeySecret");
-    textSetting(coreSettings, this.plugin, "Gemini model", "Gemini structured-output model.", "geminiModel");
 
-    const ollamaSettings = createSettingsSection(containerEl, "Optional local Ollama", "Local inference is tried before configured cloud providers.");
-    new Setting(ollamaSettings).setName("Use local Ollama").setDesc("Try local structured inference before configured cloud providers.").addToggle((toggle) => toggle.setValue(this.plugin.settings.ollamaEnabled).onChange(async (value) => { this.plugin.settings.ollamaEnabled = value; await this.plugin.saveSettings(); }));
-    textSetting(ollamaSettings, this.plugin, "Ollama URL", "Local or secured Ollama endpoint.", "ollamaUrl");
-    textSetting(ollamaSettings, this.plugin, "Ollama model", "Local structured-output model.", "ollamaModel");
+    containerEl.createEl("h3", { cls: "tps-ai-settings-hub-heading", text: "Choose what to configure" });
+    const hub = containerEl.createDiv({ cls: "tps-ai-settings-hub" });
+    let activeRouteButton: HTMLButtonElement | null = null;
+    for (const route of AI_SETTINGS_ROUTES) {
+      const isActive = route.id === this.activeRoute;
+      const button = hub.createEl("button", {
+        cls: "tps-ai-settings-route-button",
+        attr: {
+          type: "button",
+          "aria-pressed": String(isActive),
+          "aria-label": `${route.title}: ${route.description}`,
+        },
+      });
+      if (isActive) activeRouteButton = button;
+      button.createSpan({ cls: "tps-ai-settings-route-title", text: route.title });
+      button.createSpan({ cls: "tps-ai-settings-route-description", text: route.description });
+      button.addEventListener("click", () => {
+        if (this.activeRoute === route.id) return;
+        this.activeRoute = route.id;
+        this.renderSettings(true);
+      });
+    }
 
-    const diagnostics = createSettingsSection(containerEl, "Diagnostics", "Optional privacy-safe provider routing logs.");
-    new Setting(diagnostics).setName("Enable logging").setDesc("Log provider/capability routing and metadata counts without prompts, responses, metadata values, or secrets.").addToggle((toggle) => toggle.setValue(this.plugin.settings.enableLogging).onChange(async (value) => { this.plugin.settings.enableLogging = value; await this.plugin.saveSettings(); }));
+    const route = AI_SETTINGS_ROUTES.find((candidate) => candidate.id === this.activeRoute) ?? AI_SETTINGS_ROUTES[0];
+    const page = containerEl.createDiv({ cls: "tps-ai-settings-page" });
+    const pageHeading = page.createEl("h3", {
+      text: route.title,
+      attr: { tabindex: "-1" },
+    });
+    page.createEl("p", { cls: "setting-item-description", text: route.description });
+
+    if (this.activeRoute === "cloud") {
+      secretReferenceSetting(page, this.plugin, "OpenAI API key", "Select or create a device-local Obsidian secret. API billing is separate from ChatGPT/Codex subscriptions.", "openAiApiKeySecret");
+      textSetting(page, this.plugin, "OpenAI model", "OpenAI structured-output model.", "openAiModel");
+      secretReferenceSetting(page, this.plugin, "Gemini API key", "Select or create a device-local Obsidian secret for the mobile-capable cloud fallback.", "geminiApiKeySecret");
+      textSetting(page, this.plugin, "Gemini model", "Gemini structured-output model.", "geminiModel");
+    } else if (this.activeRoute === "local") {
+      new Setting(page).setName("Use local Ollama").setDesc("Try local structured inference before configured cloud providers.").addToggle((toggle) => toggle.setValue(this.plugin.settings.ollamaEnabled).onChange(async (value) => { this.plugin.settings.ollamaEnabled = value; await this.plugin.saveSettings(); }));
+      textSetting(page, this.plugin, "Ollama URL", "Local or secured Ollama endpoint.", "ollamaUrl");
+      textSetting(page, this.plugin, "Ollama model", "Local structured-output model.", "ollamaModel");
+    } else {
+      new Setting(page).setName("Enable logging").setDesc("Log provider/capability routing and metadata counts without prompts, responses, metadata values, or secrets.").addToggle((toggle) => toggle.setValue(this.plugin.settings.enableLogging).onChange(async (value) => { this.plugin.settings.enableLogging = value; await this.plugin.saveSettings(); }));
+    }
+
+    if (focusPageHeading) {
+      containerEl.scrollTop = 0;
+      window.requestAnimationFrame(() => {
+        activeRouteButton?.scrollIntoView({ block: "nearest", inline: "nearest" });
+        pageHeading.focus({ preventScroll: true });
+        pageHeading.scrollIntoView({ block: "start" });
+      });
+    }
   }
 }
 
-function createSettingsSection(parent: HTMLElement, title: string, description: string): HTMLElement {
-  const details = parent.createEl("details", { cls: "tps-collapsible-section" });
-  const summary = details.createEl("summary", { cls: "tps-collapsible-section-summary" });
-  summary.createSpan({ cls: "tps-collapsible-section-title", text: title });
-  details.createEl("p", { cls: "tps-collapsible-section-description", text: description });
-  return details.createDiv({ cls: "tps-collapsible-section-content" });
-}
+type AiSettingsRoute = "cloud" | "local" | "diagnostics";
+const AI_SETTINGS_ROUTES: ReadonlyArray<{ id: AiSettingsRoute; title: string; description: string }> = [
+  { id: "cloud", title: "Cloud providers", description: "Choose device-local credentials and models for OpenAI and Gemini." },
+  { id: "local", title: "Local Ollama", description: "Configure optional local-first inference before cloud fallbacks." },
+  { id: "diagnostics", title: "Diagnostics", description: "Control privacy-safe provider and capability routing logs." },
+];
 
 type TextSettingKey = "ollamaUrl" | "ollamaModel" | "openAiModel" | "geminiModel";
 function textSetting(container: HTMLElement, plugin: TpsAiGatewayPlugin, name: string, description: string, key: TextSettingKey): void { new Setting(container).setName(name).setDesc(description).addText((text) => text.setValue(plugin.settings[key]).onChange(async (value) => { plugin.settings[key] = value.trim(); await plugin.saveSettings(); })); }

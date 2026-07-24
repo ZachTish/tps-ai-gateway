@@ -11,6 +11,7 @@ const timeoutSource = readFileSync(new URL("../src/provider-timeout.ts", import.
 const settingsSource = readFileSync(new URL("../src/settings.ts", import.meta.url), "utf8");
 const schemaSource = readFileSync(new URL("../src/schema.ts", import.meta.url), "utf8");
 const remoteQueueSource = readFileSync(new URL("../src/remote-queue.ts", import.meta.url), "utf8");
+const stylesSource = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
 const manifest = JSON.parse(readFileSync(new URL("../manifest.json", import.meta.url), "utf8"));
 const schemaModule = transformSync(schemaSource, { loader: "ts", format: "esm", target: "es2020" }).code;
 const { assertSchema } = await import(`data:text/javascript;base64,${Buffer.from(schemaModule).toString("base64")}`);
@@ -351,4 +352,40 @@ test("remote queue validates jobs, reclaims stale work, and expires retained res
   assert.equal(remoteAiJobIsClaimable({ ...job, status: "processing", startedAt: new Date(now).toISOString() }, now), false);
   assert.equal(remoteAiJobIsExpired({ ...job, status: "complete", updatedAt: new Date(now - 49 * 60 * 60 * 1000).toISOString() }, now), true);
   assert.equal(remoteAiJobPath("job / unsafe"), "_assets/TPS AI Queue/job-unsafe.md");
+});
+
+test("gateway settings use a shallow three-destination routed hub", () => {
+  assert.match(main, /Choose what to configure/);
+  assert.match(main, /title: "Cloud providers"/);
+  assert.match(main, /title: "Local Ollama"/);
+  assert.match(main, /title: "Diagnostics"/);
+  assert.match(main, /"aria-pressed": String\(isActive\)/);
+  assert.match(main, /pageHeading\.focus\(\{ preventScroll: true \}\)/);
+  assert.match(main, /pageHeading\.scrollIntoView\(\{ block: "start" \}\)/);
+  assert.match(main, /activeRouteButton\?\.scrollIntoView\(\{ block: "nearest", inline: "nearest" \}\)/);
+  assert.doesNotMatch(main, /createEl\("details"/);
+  assert.doesNotMatch(main, /tps-collapsible-section/);
+
+  for (const control of [
+    "OpenAI API key",
+    "OpenAI model",
+    "Gemini API key",
+    "Gemini model",
+    "Use local Ollama",
+    "Ollama URL",
+    "Ollama model",
+    "Enable logging",
+  ]) {
+    assert.match(main, new RegExp(control.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+
+  assert.match(stylesSource, /\.tps-ai-settings-route-button:focus-visible/);
+  assert.match(stylesSource, /\.tps-ai-settings-page > h3:focus-visible/);
+  assert.match(stylesSource, /height: auto/);
+  assert.match(stylesSource, /\.tps-ai-settings-page > h3\s*\{[^}]*scroll-margin-top:/s);
+  assert.match(stylesSource, /@media \(max-width: 700px\)/);
+  assert.match(stylesSource, /overflow-x: auto/);
+  assert.match(stylesSource, /\.tps-ai-settings-page \.setting-item\s*\{[^}]*flex-direction:\s*column/s);
+  assert.match(stylesSource, /\.tps-ai-settings-page \.setting-item-control\s*\{[^}]*width:\s*100%/s);
+  assert.match(stylesSource, /\.tps-ai-settings-page \.setting-item-control input\[type="text"\][\s\S]*width:\s*100%/);
 });

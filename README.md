@@ -1,16 +1,17 @@
 # TPS AI Gateway
 
-## 0.1.4
+## 0.2.0
 
-- Settings persistence reloads the newest plugin data and merges only locally changed fields, preserving synchronized preferences and unknown/newer-schema fields.
-- Explicit provider subsets and intentionally empty text values survive reload. Rapid edits retain quick reverts, callers wait for durable state, a queued newer write supersedes an in-flight failure, and live edits made during I/O are reconciled safely.
-- This backward-compatible patch keeps the minimum supported Obsidian version at 1.12.0 and requires no manual migration.
+- Settings now use three clean destinations for cloud providers, local Ollama, and diagnostics, rendering only the selected page.
+- The new hub is keyboard-accessible and mobile-safe without changing provider order, credentials, models, logging, or fallback behavior.
+- This backward-compatible minor release keeps the minimum supported Obsidian version at 1.12.0 and requires no settings migration.
 
 ## Development and deployment
 
 Canonical source, tests, Git metadata, and dependencies live in `/Users/zachtisherman/TishOS Plugin Development/tps-ai-gateway`, outside both vaults. `npm run build` and watch builds deploy byte-changed runtime artifacts by default only to `/Users/zachtisherman/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian Plugin Test Vault/.obsidian/plugins/tps-ai-gateway`; `npm test` is therefore isolated even though it ends with a production-mode build. Promotion to `/Users/zachtisherman/TishOS v0.1/.obsidian/plugins/tps-ai-gateway` is an explicit guarded post-validation action. Neither target overwrites `data.json` or other runtime-owned state.
 
 - 2026-07-16 isolation validation: all 8 declared tests and the required final `npm run build` passed with `[runtime-deploy] target=test ... unchanged`. Obsidian 1.12.7 loaded the gateway in the registered test vault without copied credentials or explicit provider requests. No live promotion occurred, and production runtime checksums remained unchanged.
+- 2026-07-24 settings-release validation: all 16 gateway, persistence, queue, privacy, and routed-settings tests passed. The required final standalone build deployed only to `[runtime-deploy] target=test`. Obsidian 1.12.7 was reloaded with `Reload app without saving`; all three settings destinations, the shared nine-plugin `Choose what to configure` pattern, and the Health-to-Gateway ownership handoff were inspected in the registered test vault without changing a provider, linking a secret, or sending a request. The pre/post `data.json` SHA-256 remained `6cfa72987ad1b642a8368b6c342a0b22d39fcab83af988b13e77c9398baee42b`; production was not accessed or promoted.
 
 ## Install with BRAT
 
@@ -68,13 +69,21 @@ Capability handlers are registered at runtime and removed when their owner unloa
 
 ## Version notes
 
+- 0.2.0: Reorganized settings into a shallow accessible destination hub with a horizontal mobile layout and no nested disclosures, preserving all provider and diagnostics settings.
+- 0.1.4: Made settings persistence merge only local intent into the newest synchronized data, preserving unknown fields, deliberate empty values, quick reverts, and edits made while a save is in flight.
+- 0.1.3: Added Controller-mediated remote structured execution for user devices through a durable, reclaimable, expiring vault-synced queue with TPS Notifier completion/failure messages.
 - 0.1.2: Bounded every provider attempt so fallback cannot hang indefinitely, moved Gemini authentication out of the URL, redacted credential-shaped provider failures before logging or display, reduced arbitrary request metadata to a field count in diagnostics, and aligned the manifest minimum with the Obsidian 1.12.0 SecretStorage contract.
 - 0.1.1: Moved cloud API credentials from plugin data into device-local Obsidian SecretStorage, with an automatic legacy migration that preserves an already populated secret instead of overwriting it.
-- 0.1.3: Added Controller-mediated remote structured execution for user devices through a durable, reclaimable, expiring vault-synced queue with TPS Notifier completion/failure messages.
 - 0.1.0: Initial structured-provider gateway, guarded capability registry, and ordered fallback chain.
 
 ## Settings layout
 
-Cloud provider credentials and models remain root-level core controls. Optional local Ollama configuration and privacy-safe diagnostics are separate collapsed groups. The settings page uses one collapse level and opens with both optional groups closed.
+Settings open on a shallow three-destination `Choose what to configure` hub:
+
+- **Cloud providers** (default): OpenAI and Gemini device-local SecretStorage references and model names.
+- **Local Ollama**: the local-first toggle, endpoint, and model.
+- **Diagnostics**: privacy-safe logging.
+
+Only the selected destination is rendered, there are no nested disclosures, and route selection is transient rather than persisted. No provider, credential, model, or diagnostics setting was renamed or migrated. Native `aria-pressed` route buttons, visible focus styling, page-heading focus restoration, and a horizontal mobile route strip keep the same controls usable in narrow settings views.
 
 - 2026-07-13: Separated optional local inference and diagnostics from core cloud-provider configuration, added matching settings styles, and kept all optional sections collapsed by default. Validation: settings hierarchy audit, full test suite, production build/deploy, and Obsidian reload.
