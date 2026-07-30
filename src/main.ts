@@ -174,17 +174,21 @@ export default class TpsAiGatewayPlugin extends Plugin {
           const files = this.app.vault.getMarkdownFiles().filter((file) => file.path.startsWith(`${REMOTE_AI_QUEUE_FOLDER}/`));
           logger.flow("RemoteQueue", "scan", { reason, files: files.length });
           for (const file of files) {
-            const job = parseRemoteAiJob(await this.app.vault.read(file));
-            if (!job) {
-              logger.warn("RemoteQueue", "invalid-job", { path: file.path });
-              continue;
+            try {
+              const job = parseRemoteAiJob(await this.app.vault.read(file));
+              if (!job) {
+                logger.warn("RemoteQueue", "invalid-job", { path: file.path });
+                continue;
+              }
+              if (remoteAiJobIsExpired(job)) {
+                await this.app.vault.delete(file);
+                logger.flow("RemoteQueue", "expired", { jobId: job.id, taskId: job.taskId });
+                continue;
+              }
+              if (remoteAiJobIsClaimable(job)) await this.processRemoteJob(file, job);
+            } catch (error) {
+              logger.warn("RemoteQueue", "file-scan-failed", { reason, path: file.path, error: logger.errorSummary(error) });
             }
-            if (remoteAiJobIsExpired(job)) {
-              await this.app.vault.delete(file);
-              logger.flow("RemoteQueue", "expired", { jobId: job.id, taskId: job.taskId });
-              continue;
-            }
-            if (remoteAiJobIsClaimable(job)) await this.processRemoteJob(file, job);
           }
         } catch (error) {
           logger.warn("RemoteQueue", "scan-failed", { reason, error: logger.errorSummary(error) });

@@ -459,6 +459,69 @@ test("remote queue coalesces overlapping scan requests into one trailing pass", 
   assert.equal(quietSnapshots, 1);
 });
 
+test("remote queue isolates a failed file without blocking later jobs", async () => {
+  const { default: GatewayPlugin } = await importGatewayPlugin();
+  const files = Array.from({ length: 100 }, (_, index) => ({
+    path: `_assets/TPS AI Queue/job-${String(index).padStart(3, "0")}.md`,
+  }));
+  const failedFile = files[37];
+  const readPaths = [];
+  const processedPaths = [];
+  const warnings = [];
+  let activeReads = 0;
+  let maxActiveReads = 0;
+  const originalWarn = console.warn;
+  const plugin = Object.create(GatewayPlugin.prototype);
+  plugin.remoteQueueScanInFlight = false;
+  plugin.remoteQueueRescanRequested = false;
+  plugin.isControllerDevice = () => true;
+  plugin.processRemoteJob = async (file) => {
+    processedPaths.push(file.path);
+  };
+  plugin.app = {
+    vault: {
+      getMarkdownFiles: () => [...files],
+      read: async (file) => {
+        readPaths.push(file.path);
+        activeReads += 1;
+        maxActiveReads = Math.max(maxActiveReads, activeReads);
+        try {
+          if (file === failedFile) throw new Error("synthetic read failure");
+          return JSON.stringify({
+            version: 1,
+            id: file.path.split("/").pop().replace(/\.md$/, ""),
+            taskId: "health.describe-food.extract",
+            requesterDeviceId: "phone",
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            status: "pending",
+            messages: [{ role: "user", content: "synthetic request" }],
+            schema: { type: "object" },
+          });
+        } finally {
+          activeReads -= 1;
+        }
+      },
+    },
+  };
+
+  console.warn = (...args) => warnings.push(args);
+  try {
+    await plugin.scanRemoteQueue("qa");
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  assert.deepEqual(readPaths, files.map((file) => file.path));
+  assert.deepEqual(processedPaths, files.filter((file) => file !== failedFile).map((file) => file.path));
+  assert.equal(maxActiveReads, 1);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0][0], /file-scan-failed/);
+  assert.equal(warnings[0][1].path, failedFile.path);
+  assert.equal(plugin.remoteQueueScanInFlight, false);
+  assert.equal(plugin.remoteQueueRescanRequested, false);
+});
+
 test("remote queue bounds an active epoch and defers work raised during its trailing pass", async () => {
   const { default: GatewayPlugin } = await importGatewayPlugin();
   const firstReadEntered = deferred();
