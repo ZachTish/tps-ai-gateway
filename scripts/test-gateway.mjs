@@ -30,7 +30,7 @@ const { errorSummary, metadataSummary } = await import(`data:text/javascript;bas
 const timeoutModule = transformSync(timeoutSource, { loader: "ts", format: "esm", target: "es2020" }).code;
 const { withProviderTimeout } = await import(`data:text/javascript;base64,${Buffer.from(timeoutModule).toString("base64")}`);
 const remoteQueueModule = transformSync(remoteQueueSource, { loader: "ts", format: "esm", target: "es2020" }).code;
-const { parseRemoteAiJob, remoteAiJobIsClaimable, remoteAiJobIsExpired, remoteAiJobPath } = await import(`data:text/javascript;base64,${Buffer.from(remoteQueueModule).toString("base64")}`);
+const { parseRemoteAiJob, remoteAiJobIsClaimable, remoteAiJobIsExpired, remoteAiJobPath, REMOTE_AI_QUEUE_FOLDER } = await import(`data:text/javascript;base64,${Buffer.from(remoteQueueModule).toString("base64")}`);
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const deferred = () => {
@@ -38,6 +38,21 @@ const deferred = () => {
   const promise = new Promise((complete) => { resolve = complete; });
   return { promise, resolve };
 };
+const queueFile = (path) => ({
+  kind: "file",
+  path,
+  extension: path.includes(".") ? path.slice(path.lastIndexOf(".") + 1) : "",
+});
+const queueFolder = (path, children = []) => ({ kind: "folder", path, children });
+const queueVault = (getChildren, methods = {}) => ({
+  getFolderByPath: (path) => path === REMOTE_AI_QUEUE_FOLDER
+    ? queueFolder(REMOTE_AI_QUEUE_FOLDER, getChildren())
+    : null,
+  getMarkdownFiles: () => {
+    throw new Error("Remote queue scans must not enumerate all vault Markdown files.");
+  },
+  ...methods,
+});
 
 async function importGatewayPlugin() {
   const bundle = await esbuildBuild({
@@ -59,7 +74,24 @@ async function importGatewayPlugin() {
             export class PluginSettingTab {}
             export class SecretComponent {}
             export class Setting {}
-            export class TFile {}
+            export class TFile {
+              static [Symbol.hasInstance](value) {
+                return value?.kind === "file";
+              }
+            }
+            export class TFolder {
+              static [Symbol.hasInstance](value) {
+                return value?.kind === "folder";
+              }
+            }
+            export class Vault {
+              static recurseChildren(root, callback) {
+                for (const child of root.children) {
+                  callback(child);
+                  if (child instanceof TFolder) Vault.recurseChildren(child, callback);
+                }
+              }
+            }
             export async function requestUrl() {
               throw new Error("Network access is not available in gateway unit tests.");
             }
@@ -387,12 +419,185 @@ test("remote queue validates jobs, reclaims stale work, and expires retained res
   assert.equal(remoteAiJobPath("job / unsafe"), "_assets/TPS AI Queue/job-unsafe.md");
 });
 
+test("remote queue scans only recursive Markdown children in public traversal order", async () => {
+  const { default: GatewayPlugin } = await importGatewayPlugin();
+  const directZ = queueFile(`${REMOTE_AI_QUEUE_FOLDER}/z-direct.md`);
+  const nestedM = queueFile(`${REMOTE_AI_QUEUE_FOLDER}/a-folder/m-middle.md`);
+  const deepB = queueFile(`${REMOTE_AI_QUEUE_FOLDER}/a-folder/deeper/b-deep.md`);
+  const directC = queueFile(`${REMOTE_AI_QUEUE_FOLDER}/c-direct.md`);
+  const ignoredFile = queueFile(`${REMOTE_AI_QUEUE_FOLDER}/a-folder/ignored.json`);
+  const root = queueFolder(REMOTE_AI_QUEUE_FOLDER, [
+    directZ,
+    queueFolder(`${REMOTE_AI_QUEUE_FOLDER}/a-folder`, [
+      nestedM,
+      ignoredFile,
+      queueFolder(`${REMOTE_AI_QUEUE_FOLDER}/a-folder/deeper`, [deepB]),
+    ]),
+    directC,
+  ]);
+  const readPaths = [];
+  let folderLookups = 0;
+  let wholeVaultCalls = 0;
+  const plugin = Object.create(GatewayPlugin.prototype);
+  plugin.remoteQueueScanInFlight = false;
+  plugin.remoteQueueRescanRequested = false;
+  plugin.isControllerDevice = () => true;
+  plugin.app = {
+    vault: {
+      getFolderByPath: (path) => {
+        folderLookups += 1;
+        return path === REMOTE_AI_QUEUE_FOLDER ? root : null;
+      },
+      getMarkdownFiles: () => {
+        wholeVaultCalls += 1;
+        throw new Error("Whole-vault enumeration is forbidden in this regression.");
+      },
+      read: async (file) => {
+        readPaths.push(file.path);
+        return JSON.stringify({
+          version: 1,
+          id: file.path.split("/").pop().replace(/\.md$/, ""),
+          taskId: "health.describe-food.extract",
+          requesterDeviceId: "phone",
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          status: "complete",
+          messages: [{ role: "user", content: "synthetic request" }],
+          schema: { type: "object" },
+        });
+      },
+    },
+  };
+
+  await plugin.scanRemoteQueue("targeted-enumeration");
+
+  assert.deepEqual(readPaths, [directZ.path, nestedM.path, deepB.path, directC.path]);
+  assert.equal(folderLookups, 1);
+  assert.equal(wholeVaultCalls, 0);
+  const scannerSource = main.slice(
+    main.indexOf("private getRemoteQueueMarkdownFiles"),
+    main.indexOf("private async processRemoteJob"),
+  );
+  assert.match(scannerSource, /getFolderByPath\(REMOTE_AI_QUEUE_FOLDER\)/);
+  assert.match(scannerSource, /Vault\.recurseChildren/);
+  assert.doesNotMatch(scannerSource, /getMarkdownFiles/);
+});
+
+test("remote queue treats a missing folder or exact-path file collision as an empty snapshot", async () => {
+  const { default: GatewayPlugin } = await importGatewayPlugin();
+  for (const collision of [false, true]) {
+    let reads = 0;
+    let wholeVaultCalls = 0;
+    const warnings = [];
+    const originalWarn = console.warn;
+    const plugin = Object.create(GatewayPlugin.prototype);
+    plugin.remoteQueueScanInFlight = false;
+    plugin.remoteQueueRescanRequested = false;
+    plugin.isControllerDevice = () => true;
+    plugin.app = {
+      vault: {
+        getFolderByPath: () => null,
+        getAbstractFileByPath: () => collision ? queueFile(REMOTE_AI_QUEUE_FOLDER) : null,
+        getMarkdownFiles: () => {
+          wholeVaultCalls += 1;
+          return [];
+        },
+        read: async () => {
+          reads += 1;
+          return "";
+        },
+      },
+    };
+
+    console.warn = (...args) => warnings.push(args);
+    try {
+      await plugin.scanRemoteQueue(collision ? "path-collision" : "missing-folder");
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    assert.equal(reads, 0);
+    assert.equal(wholeVaultCalls, 0);
+    assert.deepEqual(warnings, []);
+    assert.equal(plugin.remoteQueueScanInFlight, false);
+    assert.equal(plugin.remoteQueueRescanRequested, false);
+  }
+});
+
+test("remote queue materializes a snapshot before reading its first file", async () => {
+  const { default: GatewayPlugin } = await importGatewayPlugin();
+  const firstFile = queueFile(`${REMOTE_AI_QUEUE_FOLDER}/first.md`);
+  const laterFile = queueFile(`${REMOTE_AI_QUEUE_FOLDER}/later.md`);
+  const root = queueFolder(REMOTE_AI_QUEUE_FOLDER, [firstFile]);
+  const readPaths = [];
+  const plugin = Object.create(GatewayPlugin.prototype);
+  plugin.remoteQueueScanInFlight = false;
+  plugin.remoteQueueRescanRequested = false;
+  plugin.isControllerDevice = () => true;
+  plugin.app = {
+    vault: {
+      getFolderByPath: () => root,
+      read: async (file) => {
+        readPaths.push(file.path);
+        if (readPaths.length === 1) root.children.push(laterFile);
+        return JSON.stringify({
+          version: 1,
+          id: file.path.split("/").pop().replace(/\.md$/, ""),
+          taskId: "health.describe-food.extract",
+          requesterDeviceId: "phone",
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          status: "complete",
+          messages: [{ role: "user", content: "synthetic request" }],
+          schema: { type: "object" },
+        });
+      },
+    },
+  };
+
+  await plugin.scanRemoteQueue("snapshot");
+  assert.deepEqual(readPaths, [firstFile.path]);
+  await plugin.scanRemoteQueue("next-snapshot");
+  assert.deepEqual(readPaths, [firstFile.path, firstFile.path, laterFile.path]);
+});
+
+test("remote queue contains folder-enumeration failures to one scan pass", async () => {
+  const { default: GatewayPlugin } = await importGatewayPlugin();
+  const warnings = [];
+  const originalWarn = console.warn;
+  const plugin = Object.create(GatewayPlugin.prototype);
+  plugin.remoteQueueScanInFlight = false;
+  plugin.remoteQueueRescanRequested = false;
+  plugin.isControllerDevice = () => true;
+  plugin.app = {
+    vault: {
+      getFolderByPath: () => {
+        throw new Error("synthetic enumeration failure");
+      },
+    },
+  };
+
+  console.warn = (...args) => warnings.push(args);
+  try {
+    await plugin.scanRemoteQueue("enumeration-failure");
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0][0], /scan-failed/);
+  assert.equal(warnings[0][1].reason, "enumeration-failure");
+  assert.match(warnings[0][1].error, /synthetic enumeration failure/);
+  assert.equal(plugin.remoteQueueScanInFlight, false);
+  assert.equal(plugin.remoteQueueRescanRequested, false);
+});
+
 test("remote queue coalesces overlapping scan requests into one trailing pass", async () => {
   const { default: GatewayPlugin } = await importGatewayPlugin();
   const firstReadEntered = deferred();
   const allowFirstRead = deferred();
-  const firstFile = { path: "_assets/TPS AI Queue/complete-job-a.md" };
-  const secondFile = { path: "_assets/TPS AI Queue/complete-job-b.md" };
+  const firstFile = queueFile(`${REMOTE_AI_QUEUE_FOLDER}/complete-job-a.md`);
+  const secondFile = queueFile(`${REMOTE_AI_QUEUE_FOLDER}/nested/complete-job-b.md`);
   const createCompleteJob = (id) => JSON.stringify({
     version: 1,
     id,
@@ -404,7 +609,7 @@ test("remote queue coalesces overlapping scan requests into one trailing pass", 
     messages: [{ role: "user", content: "synthetic request" }],
     schema: { type: "object" },
   });
-  let files = [firstFile];
+  let children = [firstFile];
   let snapshots = 0;
   const readPaths = [];
   let activeReads = 0;
@@ -414,31 +619,33 @@ test("remote queue coalesces overlapping scan requests into one trailing pass", 
   plugin.remoteQueueRescanRequested = false;
   plugin.isControllerDevice = () => true;
   plugin.app = {
-    vault: {
-      getMarkdownFiles: () => {
+    vault: queueVault(
+      () => {
         snapshots += 1;
-        return [...files];
+        return [...children];
       },
-      read: async (file) => {
-        readPaths.push(file.path);
-        activeReads += 1;
-        maxActiveReads = Math.max(maxActiveReads, activeReads);
-        try {
-          if (readPaths.length === 1) {
-            firstReadEntered.resolve();
-            await allowFirstRead.promise;
+      {
+        read: async (file) => {
+          readPaths.push(file.path);
+          activeReads += 1;
+          maxActiveReads = Math.max(maxActiveReads, activeReads);
+          try {
+            if (readPaths.length === 1) {
+              firstReadEntered.resolve();
+              await allowFirstRead.promise;
+            }
+            return createCompleteJob(file === firstFile ? "complete-job-a" : "complete-job-b");
+          } finally {
+            activeReads -= 1;
           }
-          return createCompleteJob(file === firstFile ? "complete-job-a" : "complete-job-b");
-        } finally {
-          activeReads -= 1;
-        }
+        },
       },
-    },
+    ),
   };
 
   const activeScan = plugin.scanRemoteQueue("initial");
   await firstReadEntered.promise;
-  files = [firstFile, secondFile];
+  children = [firstFile, queueFolder(`${REMOTE_AI_QUEUE_FOLDER}/nested`, [secondFile])];
   await Promise.all(Array.from({ length: 100 }, () => plugin.scanRemoteQueue("file-modified")));
   allowFirstRead.resolve();
   await activeScan;
@@ -450,20 +657,18 @@ test("remote queue coalesces overlapping scan requests into one trailing pass", 
   assert.equal(plugin.remoteQueueScanInFlight, false);
   assert.equal(plugin.remoteQueueRescanRequested, false);
 
-  let quietSnapshots = 0;
-  plugin.app.vault.getMarkdownFiles = () => {
-    quietSnapshots += 1;
-    return [];
-  };
+  const snapshotsBeforeQuietScan = snapshots;
+  children = [];
   await plugin.scanRemoteQueue("quiet");
-  assert.equal(quietSnapshots, 1);
+  assert.equal(snapshots, snapshotsBeforeQuietScan + 1);
 });
 
 test("remote queue isolates a failed file without blocking later jobs", async () => {
   const { default: GatewayPlugin } = await importGatewayPlugin();
-  const files = Array.from({ length: 100 }, (_, index) => ({
-    path: `_assets/TPS AI Queue/job-${String(index).padStart(3, "0")}.md`,
-  }));
+  const files = Array.from(
+    { length: 100 },
+    (_, index) => queueFile(`${REMOTE_AI_QUEUE_FOLDER}/job-${String(index).padStart(3, "0")}.md`),
+  );
   const failedFile = files[37];
   const readPaths = [];
   const processedPaths = [];
@@ -479,30 +684,32 @@ test("remote queue isolates a failed file without blocking later jobs", async ()
     processedPaths.push(file.path);
   };
   plugin.app = {
-    vault: {
-      getMarkdownFiles: () => [...files],
-      read: async (file) => {
-        readPaths.push(file.path);
-        activeReads += 1;
-        maxActiveReads = Math.max(maxActiveReads, activeReads);
-        try {
-          if (file === failedFile) throw new Error("synthetic read failure");
-          return JSON.stringify({
-            version: 1,
-            id: file.path.split("/").pop().replace(/\.md$/, ""),
-            taskId: "health.describe-food.extract",
-            requesterDeviceId: "phone",
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-            status: "pending",
-            messages: [{ role: "user", content: "synthetic request" }],
-            schema: { type: "object" },
-          });
-        } finally {
-          activeReads -= 1;
-        }
+    vault: queueVault(
+      () => [...files],
+      {
+        read: async (file) => {
+          readPaths.push(file.path);
+          activeReads += 1;
+          maxActiveReads = Math.max(maxActiveReads, activeReads);
+          try {
+            if (file === failedFile) throw new Error("synthetic read failure");
+            return JSON.stringify({
+              version: 1,
+              id: file.path.split("/").pop().replace(/\.md$/, ""),
+              taskId: "health.describe-food.extract",
+              requesterDeviceId: "phone",
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+              status: "pending",
+              messages: [{ role: "user", content: "synthetic request" }],
+              schema: { type: "object" },
+            });
+          } finally {
+            activeReads -= 1;
+          }
+        },
       },
-    },
+    ),
   };
 
   console.warn = (...args) => warnings.push(args);
@@ -528,9 +735,9 @@ test("remote queue bounds an active epoch and defers work raised during its trai
   const allowFirstRead = deferred();
   const trailingReadEntered = deferred();
   const allowTrailingRead = deferred();
-  const firstFile = { path: "_assets/TPS AI Queue/complete-job-a.md" };
-  const trailingFile = { path: "_assets/TPS AI Queue/complete-job-b.md" };
-  let files = [firstFile];
+  const firstFile = queueFile(`${REMOTE_AI_QUEUE_FOLDER}/complete-job-a.md`);
+  const trailingFile = queueFile(`${REMOTE_AI_QUEUE_FOLDER}/nested/complete-job-b.md`);
+  let children = [firstFile];
   let snapshots = 0;
   let activeReads = 0;
   let maxActiveReads = 0;
@@ -541,43 +748,45 @@ test("remote queue bounds an active epoch and defers work raised during its trai
   plugin.isControllerDevice = () => true;
   plugin.scheduleRemoteQueueScan = (reason) => scheduledReasons.push(reason);
   plugin.app = {
-    vault: {
-      getMarkdownFiles: () => {
+    vault: queueVault(
+      () => {
         snapshots += 1;
-        return [...files];
+        return [...children];
       },
-      read: async (file) => {
-        activeReads += 1;
-        maxActiveReads = Math.max(maxActiveReads, activeReads);
-        try {
-          if (file === firstFile) {
-            firstReadEntered.resolve();
-            await allowFirstRead.promise;
-          } else {
-            trailingReadEntered.resolve();
-            await allowTrailingRead.promise;
+      {
+        read: async (file) => {
+          activeReads += 1;
+          maxActiveReads = Math.max(maxActiveReads, activeReads);
+          try {
+            if (file === firstFile) {
+              firstReadEntered.resolve();
+              await allowFirstRead.promise;
+            } else {
+              trailingReadEntered.resolve();
+              await allowTrailingRead.promise;
+            }
+            return JSON.stringify({
+              version: 1,
+              id: file === firstFile ? "complete-job-a" : "complete-job-b",
+              taskId: "health.describe-food.extract",
+              requesterDeviceId: "phone",
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+              status: "complete",
+              messages: [{ role: "user", content: "synthetic request" }],
+              schema: { type: "object" },
+            });
+          } finally {
+            activeReads -= 1;
           }
-          return JSON.stringify({
-            version: 1,
-            id: file === firstFile ? "complete-job-a" : "complete-job-b",
-            taskId: "health.describe-food.extract",
-            requesterDeviceId: "phone",
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-            status: "complete",
-            messages: [{ role: "user", content: "synthetic request" }],
-            schema: { type: "object" },
-          });
-        } finally {
-          activeReads -= 1;
-        }
+        },
       },
-    },
+    ),
   };
 
   const activeScan = plugin.scanRemoteQueue("initial");
   await firstReadEntered.promise;
-  files = [trailingFile];
+  children = [queueFolder(`${REMOTE_AI_QUEUE_FOLDER}/nested`, [trailingFile])];
   await plugin.scanRemoteQueue("during-initial");
   allowFirstRead.resolve();
   await trailingReadEntered.promise;
@@ -596,7 +805,7 @@ test("remote queue skips a requested trailing pass after controller authority is
   const { default: GatewayPlugin } = await importGatewayPlugin();
   const firstReadEntered = deferred();
   const allowFirstRead = deferred();
-  const file = { path: "_assets/TPS AI Queue/complete-job-a.md" };
+  const file = queueFile(`${REMOTE_AI_QUEUE_FOLDER}/complete-job-a.md`);
   let isController = true;
   let snapshots = 0;
   const scheduledReasons = [];
@@ -606,27 +815,29 @@ test("remote queue skips a requested trailing pass after controller authority is
   plugin.isControllerDevice = () => isController;
   plugin.scheduleRemoteQueueScan = (reason) => scheduledReasons.push(reason);
   plugin.app = {
-    vault: {
-      getMarkdownFiles: () => {
+    vault: queueVault(
+      () => {
         snapshots += 1;
         return [file];
       },
-      read: async () => {
-        firstReadEntered.resolve();
-        await allowFirstRead.promise;
-        return JSON.stringify({
-          version: 1,
-          id: "complete-job-a",
-          taskId: "health.describe-food.extract",
-          requesterDeviceId: "phone",
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-          status: "complete",
-          messages: [{ role: "user", content: "synthetic request" }],
-          schema: { type: "object" },
-        });
+      {
+        read: async () => {
+          firstReadEntered.resolve();
+          await allowFirstRead.promise;
+          return JSON.stringify({
+            version: 1,
+            id: "complete-job-a",
+            taskId: "health.describe-food.extract",
+            requesterDeviceId: "phone",
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            status: "complete",
+            messages: [{ role: "user", content: "synthetic request" }],
+            schema: { type: "object" },
+          });
+        },
       },
-    },
+    ),
   };
 
   const activeScan = plugin.scanRemoteQueue("initial");

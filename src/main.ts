@@ -1,4 +1,4 @@
-import { App, Notice, Plugin, PluginSettingTab, SecretComponent, Setting, TFile } from "obsidian";
+import { App, Notice, Plugin, PluginSettingTab, SecretComponent, Setting, TFile, Vault } from "obsidian";
 import { callProvider } from "./providers";
 import { withProviderTimeout } from "./provider-timeout";
 import { assertSchema } from "./schema";
@@ -159,6 +159,16 @@ export default class TpsAiGatewayPlugin extends Plugin {
     }, 750);
   }
 
+  private getRemoteQueueMarkdownFiles(): TFile[] {
+    const folder = this.app.vault.getFolderByPath(REMOTE_AI_QUEUE_FOLDER);
+    if (!folder) return [];
+    const files: TFile[] = [];
+    Vault.recurseChildren(folder, (child) => {
+      if (child instanceof TFile && child.extension === "md") files.push(child);
+    });
+    return files;
+  }
+
   private async scanRemoteQueue(reason: string): Promise<void> {
     if (!this.isControllerDevice()) return;
     if (this.remoteQueueScanInFlight) {
@@ -171,7 +181,7 @@ export default class TpsAiGatewayPlugin extends Plugin {
         if (pass > 0 && (!this.remoteQueueRescanRequested || !this.isControllerDevice())) break;
         this.remoteQueueRescanRequested = false;
         try {
-          const files = this.app.vault.getMarkdownFiles().filter((file) => file.path.startsWith(`${REMOTE_AI_QUEUE_FOLDER}/`));
+          const files = this.getRemoteQueueMarkdownFiles();
           logger.flow("RemoteQueue", "scan", { reason, files: files.length });
           for (const file of files) {
             try {
