@@ -1,8 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { transformSync } from "esbuild";
+import { build as esbuildBuild, transformSync } from "esbuild";
 import { Buffer } from "node:buffer";
+import { fileURLToPath } from "node:url";
 
 const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
 const providers = readFileSync(new URL("../src/providers.ts", import.meta.url), "utf8");
@@ -37,6 +38,38 @@ const deferred = () => {
   const promise = new Promise((complete) => { resolve = complete; });
   return { promise, resolve };
 };
+
+async function importGatewayPlugin() {
+  const bundle = await esbuildBuild({
+    entryPoints: [fileURLToPath(new URL("../src/main.ts", import.meta.url))],
+    bundle: true,
+    format: "esm",
+    platform: "node",
+    write: false,
+    plugins: [{
+      name: "obsidian-stub",
+      setup(build) {
+        build.onResolve({ filter: /^obsidian$/ }, () => ({ path: "obsidian-stub", namespace: "stub" }));
+        build.onLoad({ filter: /.*/, namespace: "stub" }, () => ({
+          loader: "js",
+          contents: `
+            export class App {}
+            export class Notice {}
+            export class Plugin {}
+            export class PluginSettingTab {}
+            export class SecretComponent {}
+            export class Setting {}
+            export class TFile {}
+            export async function requestUrl() {
+              throw new Error("Network access is not available in gateway unit tests.");
+            }
+          `,
+        }));
+      },
+    }],
+  });
+  return import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString("base64")}`);
+}
 
 test("gateway validates nested structured values", () => {
   const schema = { type: "object", additionalProperties: false, required: ["items"], properties: { items: { type: "array", items: { type: "object", required: ["id"], properties: { id: { type: "string" } } } } } };
@@ -352,6 +385,198 @@ test("remote queue validates jobs, reclaims stale work, and expires retained res
   assert.equal(remoteAiJobIsClaimable({ ...job, status: "processing", startedAt: new Date(now).toISOString() }, now), false);
   assert.equal(remoteAiJobIsExpired({ ...job, status: "complete", updatedAt: new Date(now - 49 * 60 * 60 * 1000).toISOString() }, now), true);
   assert.equal(remoteAiJobPath("job / unsafe"), "_assets/TPS AI Queue/job-unsafe.md");
+});
+
+test("remote queue coalesces overlapping scan requests into one trailing pass", async () => {
+  const { default: GatewayPlugin } = await importGatewayPlugin();
+  const firstReadEntered = deferred();
+  const allowFirstRead = deferred();
+  const firstFile = { path: "_assets/TPS AI Queue/complete-job-a.md" };
+  const secondFile = { path: "_assets/TPS AI Queue/complete-job-b.md" };
+  const createCompleteJob = (id) => JSON.stringify({
+    version: 1,
+    id,
+    taskId: "health.describe-food.extract",
+    requesterDeviceId: "phone",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    status: "complete",
+    messages: [{ role: "user", content: "synthetic request" }],
+    schema: { type: "object" },
+  });
+  let files = [firstFile];
+  let snapshots = 0;
+  const readPaths = [];
+  let activeReads = 0;
+  let maxActiveReads = 0;
+  const plugin = Object.create(GatewayPlugin.prototype);
+  plugin.remoteQueueScanInFlight = false;
+  plugin.remoteQueueRescanRequested = false;
+  plugin.isControllerDevice = () => true;
+  plugin.app = {
+    vault: {
+      getMarkdownFiles: () => {
+        snapshots += 1;
+        return [...files];
+      },
+      read: async (file) => {
+        readPaths.push(file.path);
+        activeReads += 1;
+        maxActiveReads = Math.max(maxActiveReads, activeReads);
+        try {
+          if (readPaths.length === 1) {
+            firstReadEntered.resolve();
+            await allowFirstRead.promise;
+          }
+          return createCompleteJob(file === firstFile ? "complete-job-a" : "complete-job-b");
+        } finally {
+          activeReads -= 1;
+        }
+      },
+    },
+  };
+
+  const activeScan = plugin.scanRemoteQueue("initial");
+  await firstReadEntered.promise;
+  files = [firstFile, secondFile];
+  await Promise.all(Array.from({ length: 100 }, () => plugin.scanRemoteQueue("file-modified")));
+  allowFirstRead.resolve();
+  await activeScan;
+
+  assert.equal(snapshots, 2);
+  assert.equal(readPaths[0], firstFile.path);
+  assert.ok(readPaths.includes(secondFile.path));
+  assert.equal(maxActiveReads, 1);
+  assert.equal(plugin.remoteQueueScanInFlight, false);
+  assert.equal(plugin.remoteQueueRescanRequested, false);
+
+  let quietSnapshots = 0;
+  plugin.app.vault.getMarkdownFiles = () => {
+    quietSnapshots += 1;
+    return [];
+  };
+  await plugin.scanRemoteQueue("quiet");
+  assert.equal(quietSnapshots, 1);
+});
+
+test("remote queue bounds an active epoch and defers work raised during its trailing pass", async () => {
+  const { default: GatewayPlugin } = await importGatewayPlugin();
+  const firstReadEntered = deferred();
+  const allowFirstRead = deferred();
+  const trailingReadEntered = deferred();
+  const allowTrailingRead = deferred();
+  const firstFile = { path: "_assets/TPS AI Queue/complete-job-a.md" };
+  const trailingFile = { path: "_assets/TPS AI Queue/complete-job-b.md" };
+  let files = [firstFile];
+  let snapshots = 0;
+  let activeReads = 0;
+  let maxActiveReads = 0;
+  const scheduledReasons = [];
+  const plugin = Object.create(GatewayPlugin.prototype);
+  plugin.remoteQueueScanInFlight = false;
+  plugin.remoteQueueRescanRequested = false;
+  plugin.isControllerDevice = () => true;
+  plugin.scheduleRemoteQueueScan = (reason) => scheduledReasons.push(reason);
+  plugin.app = {
+    vault: {
+      getMarkdownFiles: () => {
+        snapshots += 1;
+        return [...files];
+      },
+      read: async (file) => {
+        activeReads += 1;
+        maxActiveReads = Math.max(maxActiveReads, activeReads);
+        try {
+          if (file === firstFile) {
+            firstReadEntered.resolve();
+            await allowFirstRead.promise;
+          } else {
+            trailingReadEntered.resolve();
+            await allowTrailingRead.promise;
+          }
+          return JSON.stringify({
+            version: 1,
+            id: file === firstFile ? "complete-job-a" : "complete-job-b",
+            taskId: "health.describe-food.extract",
+            requesterDeviceId: "phone",
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            status: "complete",
+            messages: [{ role: "user", content: "synthetic request" }],
+            schema: { type: "object" },
+          });
+        } finally {
+          activeReads -= 1;
+        }
+      },
+    },
+  };
+
+  const activeScan = plugin.scanRemoteQueue("initial");
+  await firstReadEntered.promise;
+  files = [trailingFile];
+  await plugin.scanRemoteQueue("during-initial");
+  allowFirstRead.resolve();
+  await trailingReadEntered.promise;
+  await plugin.scanRemoteQueue("during-trailing");
+  allowTrailingRead.resolve();
+  await activeScan;
+
+  assert.equal(snapshots, 2);
+  assert.equal(maxActiveReads, 1);
+  assert.deepEqual(scheduledReasons, ["queued-after-trailing"]);
+  assert.equal(plugin.remoteQueueScanInFlight, false);
+  assert.equal(plugin.remoteQueueRescanRequested, false);
+});
+
+test("remote queue skips a requested trailing pass after controller authority is lost", async () => {
+  const { default: GatewayPlugin } = await importGatewayPlugin();
+  const firstReadEntered = deferred();
+  const allowFirstRead = deferred();
+  const file = { path: "_assets/TPS AI Queue/complete-job-a.md" };
+  let isController = true;
+  let snapshots = 0;
+  const scheduledReasons = [];
+  const plugin = Object.create(GatewayPlugin.prototype);
+  plugin.remoteQueueScanInFlight = false;
+  plugin.remoteQueueRescanRequested = false;
+  plugin.isControllerDevice = () => isController;
+  plugin.scheduleRemoteQueueScan = (reason) => scheduledReasons.push(reason);
+  plugin.app = {
+    vault: {
+      getMarkdownFiles: () => {
+        snapshots += 1;
+        return [file];
+      },
+      read: async () => {
+        firstReadEntered.resolve();
+        await allowFirstRead.promise;
+        return JSON.stringify({
+          version: 1,
+          id: "complete-job-a",
+          taskId: "health.describe-food.extract",
+          requesterDeviceId: "phone",
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          status: "complete",
+          messages: [{ role: "user", content: "synthetic request" }],
+          schema: { type: "object" },
+        });
+      },
+    },
+  };
+
+  const activeScan = plugin.scanRemoteQueue("initial");
+  await firstReadEntered.promise;
+  await plugin.scanRemoteQueue("file-modified");
+  isController = false;
+  allowFirstRead.resolve();
+  await activeScan;
+
+  assert.equal(snapshots, 1);
+  assert.deepEqual(scheduledReasons, []);
+  assert.equal(plugin.remoteQueueScanInFlight, false);
+  assert.equal(plugin.remoteQueueRescanRequested, false);
 });
 
 test("gateway settings use a shallow three-destination routed hub", () => {

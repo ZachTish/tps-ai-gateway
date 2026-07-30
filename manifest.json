@@ -1,7 +1,7 @@
 {
   "id": "tps-ai-gateway",
   "name": "TPS AI Gateway",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "minAppVersion": "1.12.0",
   "description": "Provider-agnostic AI messaging, structured decisions, and guarded TPS capability execution.",
   "author": "Zach Tisherman",

@@ -1,5 +1,11 @@
 # TPS AI Gateway
 
+## 0.2.1
+
+- Remote Controller queue scans now preserve file changes that arrive while a scan is active by coalescing them into one serialized trailing pass.
+- Each active scan epoch is capped at two folder snapshots; later work returns to the existing debounce, and Controller authority is rechecked before the trailing pass.
+- Provider ordering, supported provider fallback, queue files, notifications, settings, public APIs, and minimum Obsidian compatibility are unchanged.
+
 ## 0.2.0
 
 - Settings now use three clean destinations for cloud providers, local Ollama, and diagnostics, rendering only the selected page.
@@ -12,6 +18,7 @@ Canonical source, tests, Git metadata, and dependencies live in `/Users/zachtish
 
 - 2026-07-16 isolation validation: all 8 declared tests and the required final `npm run build` passed with `[runtime-deploy] target=test ... unchanged`. Obsidian 1.12.7 loaded the gateway in the registered test vault without copied credentials or explicit provider requests. No live promotion occurred, and production runtime checksums remained unchanged.
 - 2026-07-24 settings-release validation: all 16 gateway, persistence, queue, privacy, and routed-settings tests passed. The required final standalone build deployed only to `[runtime-deploy] target=test`. Obsidian 1.12.7 was reloaded with `Reload app without saving`; all three settings destinations, the shared nine-plugin `Choose what to configure` pattern, and the Health-to-Gateway ownership handoff were inspected in the registered test vault without changing a provider, linking a secret, or sending a request. The pre/post `data.json` SHA-256 remained `6cfa72987ad1b642a8368b6c342a0b22d39fcab83af988b13e77c9398baee42b`; production was not accessed or promoted.
+- 2026-07-30 queue-scheduler validation: a frozen 0.2.0 regression showed that 100 overlapping scan requests were discarded while a scan was active. Version 0.2.1 instead observed a newly arrived queue file in one serialized trailing pass, bounded an active epoch to two snapshots, deferred a third trigger through the existing debounce, kept maximum read concurrency at one, and skipped the trailing pass after Controller authority was lost. All 19 tests and the required final build passed; the reloaded test-vault settings were inspected without changing credentials or sending a provider request. Runtime `data.json` remained byte-identical, and production was not accessed.
 
 ## Install with BRAT
 
@@ -34,7 +41,7 @@ TPS AI Gateway requires Obsidian 1.12.0 or newer because its cloud-credential co
 
 Default order: local Ollama (`gemma3:12b`), OpenAI, then Gemini (`gemini-2.5-flash`). Missing, failed, or stalled providers fall through; each provider attempt has a 60-second ceiling so one transport cannot leave the whole request pending forever. Provider configuration lives only in this plugin. OpenAI and Gemini keys are selected through Obsidian SecretStorage and are never written to plugin `data.json`; upgrading from settings version 1 migrates any existing plaintext keys into the default device-local secret entries before purging the legacy fields. Gemini authentication uses the request header rather than a query string, and provider errors are redacted before they reach diagnostics or user notices. API keys, prompts, full responses, vault bodies, and caller-supplied metadata values or field names are not logged. Request-start diagnostics retain only the number of metadata fields alongside task, provider, message-count, and trace information.
 
-On TPS Controller devices, structured requests execute directly through that provider chain. On user-role devices, the gateway writes a versioned Markdown-backed JSON job to `_assets/TPS AI Queue`, using a file type that ordinary Obsidian Sync always carries. The Controller claims pending jobs, reclaims processing jobs whose claim is older than ten minutes, executes and schema-validates the request locally, writes the result or compact redacted failure back to the same job, and sends a TPS Notifier message without including prompt or response content. Callers may suppress intermediate-job notifications and provide a bounded friendly workflow title; all other jobs notify once by default. The requesting device polls the synced job for up to twenty minutes and then returns the ordinary structured result to its caller. Completed and failed jobs remain available for sync recovery for 48 hours before the Controller removes them. Queue files contain the request messages and schema inside the user's synced vault; they contain no provider credentials.
+On TPS Controller devices, structured requests execute directly through that provider chain. On user-role devices, the gateway writes a versioned Markdown-backed JSON job to `_assets/TPS AI Queue`, using a file type that ordinary Obsidian Sync always carries. The Controller claims pending jobs, reclaims processing jobs whose claim is older than ten minutes, executes and schema-validates the request locally, writes the result or compact redacted failure back to the same job, and sends a TPS Notifier message without including prompt or response content. Queue-file changes received during an active scan coalesce into one serialized trailing pass; a later burst returns to the existing debounce, and every trailing pass rechecks Controller authority. Callers may suppress intermediate-job notifications and provide a bounded friendly workflow title; all other jobs notify once by default. The requesting device polls the synced job for up to twenty minutes and then returns the ordinary structured result to its caller. Completed and failed jobs remain available for sync recovery for 48 hours before the Controller removes them. Queue files contain the request messages and schema inside the user's synced vault; they contain no provider credentials.
 
 Ollama defaults to Mac loopback and therefore is not a mobile provider. Mobile uses configured cloud fallbacks unless a separately secured Ollama endpoint is supplied. Do not expose a raw Ollama port to the internet; its local API does not authenticate requests.
 
@@ -69,6 +76,7 @@ Capability handlers are registered at runtime and removed when their owner unloa
 
 ## Version notes
 
+- 0.2.1: Preserved queue-file changes that arrive during an active Controller scan with one bounded serialized trailing pass, deferring later bursts and rechecking Controller authority without changing queue or provider behavior.
 - 0.2.0: Reorganized settings into a shallow accessible destination hub with a horizontal mobile layout and no nested disclosures, preserving all provider and diagnostics settings.
 - 0.1.4: Made settings persistence merge only local intent into the newest synchronized data, preserving unknown fields, deliberate empty values, quick reverts, and edits made while a save is in flight.
 - 0.1.3: Added Controller-mediated remote structured execution for user devices through a durable, reclaimable, expiring vault-synced queue with TPS Notifier completion/failure messages.

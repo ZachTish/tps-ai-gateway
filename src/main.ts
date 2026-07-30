@@ -20,6 +20,7 @@ export default class TpsAiGatewayPlugin extends Plugin {
   private capabilities = new Map<string, GatewayCapability>();
   private settingsPersistence: AiGatewaySettingsSaveCoordinator | null = null;
   private remoteQueueScanInFlight = false;
+  private remoteQueueRescanRequested = false;
   private remoteQueueScanTimer: number | null = null;
 
   async onload(): Promise<void> {
@@ -49,6 +50,7 @@ export default class TpsAiGatewayPlugin extends Plugin {
 
   onunload(): void {
     if (this.remoteQueueScanTimer !== null) window.clearTimeout(this.remoteQueueScanTimer);
+    this.remoteQueueRescanRequested = false;
     if ((this.app as any).tpsAiGateway === this.api) delete (this.app as any).tpsAiGateway;
     this.capabilities.clear();
     delete (this as any).api;
@@ -158,28 +160,42 @@ export default class TpsAiGatewayPlugin extends Plugin {
   }
 
   private async scanRemoteQueue(reason: string): Promise<void> {
-    if (!this.isControllerDevice() || this.remoteQueueScanInFlight) return;
+    if (!this.isControllerDevice()) return;
+    if (this.remoteQueueScanInFlight) {
+      this.remoteQueueRescanRequested = true;
+      return;
+    }
     this.remoteQueueScanInFlight = true;
     try {
-      const files = this.app.vault.getMarkdownFiles().filter((file) => file.path.startsWith(`${REMOTE_AI_QUEUE_FOLDER}/`));
-      logger.flow("RemoteQueue", "scan", { reason, files: files.length });
-      for (const file of files) {
-        const job = parseRemoteAiJob(await this.app.vault.read(file));
-        if (!job) {
-          logger.warn("RemoteQueue", "invalid-job", { path: file.path });
-          continue;
+      for (let pass = 0; pass < 2; pass += 1) {
+        if (pass > 0 && (!this.remoteQueueRescanRequested || !this.isControllerDevice())) break;
+        this.remoteQueueRescanRequested = false;
+        try {
+          const files = this.app.vault.getMarkdownFiles().filter((file) => file.path.startsWith(`${REMOTE_AI_QUEUE_FOLDER}/`));
+          logger.flow("RemoteQueue", "scan", { reason, files: files.length });
+          for (const file of files) {
+            const job = parseRemoteAiJob(await this.app.vault.read(file));
+            if (!job) {
+              logger.warn("RemoteQueue", "invalid-job", { path: file.path });
+              continue;
+            }
+            if (remoteAiJobIsExpired(job)) {
+              await this.app.vault.delete(file);
+              logger.flow("RemoteQueue", "expired", { jobId: job.id, taskId: job.taskId });
+              continue;
+            }
+            if (remoteAiJobIsClaimable(job)) await this.processRemoteJob(file, job);
+          }
+        } catch (error) {
+          logger.warn("RemoteQueue", "scan-failed", { reason, error: logger.errorSummary(error) });
         }
-        if (remoteAiJobIsExpired(job)) {
-          await this.app.vault.delete(file);
-          logger.flow("RemoteQueue", "expired", { jobId: job.id, taskId: job.taskId });
-          continue;
-        }
-        if (remoteAiJobIsClaimable(job)) await this.processRemoteJob(file, job);
+        reason = "queued";
       }
-    } catch (error) {
-      logger.warn("RemoteQueue", "scan-failed", { reason, error: logger.errorSummary(error) });
     } finally {
+      const scheduleFollowUp = this.remoteQueueRescanRequested && this.isControllerDevice();
+      this.remoteQueueRescanRequested = false;
       this.remoteQueueScanInFlight = false;
+      if (scheduleFollowUp) this.scheduleRemoteQueueScan("queued-after-trailing");
     }
   }
 
