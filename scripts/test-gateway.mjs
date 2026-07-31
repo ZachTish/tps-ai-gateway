@@ -103,6 +103,41 @@ async function importGatewayPlugin() {
   return import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString("base64")}`);
 }
 
+async function importProvidersModule(onRequest) {
+  const requestKey = `__tpsAiGatewayRequest_${Date.now()}_${Math.random()}`;
+  globalThis[requestKey] = onRequest;
+  const bundle = await esbuildBuild({
+    entryPoints: [fileURLToPath(new URL("../src/providers.ts", import.meta.url))],
+    bundle: true,
+    format: "esm",
+    platform: "node",
+    write: false,
+    plugins: [{
+      name: "obsidian-request-stub",
+      setup(build) {
+        build.onResolve({ filter: /^obsidian$/ }, () => ({
+          path: "obsidian-request-stub",
+          namespace: "stub",
+        }));
+        build.onLoad({ filter: /.*/, namespace: "stub" }, () => ({
+          loader: "js",
+          contents: `
+            export async function requestUrl(options) {
+              return globalThis[${JSON.stringify(requestKey)}](options);
+            }
+          `,
+        }));
+      },
+    }],
+  });
+  return {
+    module: await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString("base64")}`),
+    cleanup: () => {
+      delete globalThis[requestKey];
+    },
+  };
+}
+
 test("gateway validates nested structured values", () => {
   const schema = { type: "object", additionalProperties: false, required: ["items"], properties: { items: { type: "array", items: { type: "object", required: ["id"], properties: { id: { type: "string" } } } } } };
   assert.doesNotThrow(() => assertSchema({ items: [{ id: "one" }] }, schema));
@@ -120,6 +155,130 @@ test("gateway owns provider transport and fallback", () => {
   assert.match(providers, /credentials\.geminiApiKey/);
   assert.match(providers, /"x-goog-api-key": credentials\.geminiApiKey/);
   assert.doesNotMatch(providers, /generateContent\?key=/);
+});
+
+test("all providers preserve system and conversational message request shapes", async () => {
+  const requests = [];
+  const imported = await importProvidersModule(async (options) => {
+    requests.push(options);
+    if (options.url.endsWith("/api/chat")) {
+      return { json: { message: { content: ' {"ok":true} ' } } };
+    }
+    if (options.url === "https://api.openai.com/v1/responses") {
+      return { json: { output_text: ' {"ok":true} ' } };
+    }
+    return {
+      json: {
+        candidates: [{ content: { parts: [{ text: ' {"ok":' }, { text: "true} " }] } }],
+      },
+    };
+  });
+  const settings = {
+    ollamaEnabled: true,
+    ollamaUrl: "http://127.0.0.1:11434",
+    ollamaModel: "local-model",
+    openAiModel: "openai-model",
+    geminiModel: "gemini-model",
+  };
+  const credentials = {
+    openAiApiKey: "openai-secret",
+    geminiApiKey: "gemini-secret",
+  };
+  const messages = [
+    { role: "system", content: "System one" },
+    { role: "user", content: "Question" },
+    { role: "assistant", content: "Earlier answer" },
+    { role: "system", content: "System two" },
+    { role: "user", content: "Follow-up" },
+  ];
+  const conversationalMessageCount = messages.filter(({ role }) => role !== "system").length;
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    required: ["ok"],
+    properties: { ok: { type: "boolean" } },
+  };
+
+  try {
+    for (const provider of ["ollama", "openai", "gemini"]) {
+      let roleReads = 0;
+      const instrumentedMessages = messages.map(({ role, content }) => ({
+        get role() {
+          roleReads += 1;
+          return role;
+        },
+        content,
+      }));
+      assert.deepEqual(
+        await imported.module.callProvider(
+          provider,
+          settings,
+          credentials,
+          instrumentedMessages,
+          schema,
+        ),
+        {
+          text: '{"ok":true}',
+          model: provider === "ollama"
+            ? "local-model"
+            : provider === "openai"
+              ? "openai-model"
+              : "gemini-model",
+        },
+      );
+      assert.equal(roleReads, messages.length + conversationalMessageCount);
+    }
+  } finally {
+    imported.cleanup();
+  }
+
+  assert.equal(requests.length, 3);
+  const [ollamaRequest, openAiRequest, geminiRequest] = requests;
+  assert.deepEqual(JSON.parse(ollamaRequest.body), {
+    model: "local-model",
+    stream: false,
+    format: schema,
+    messages: [
+      {
+        role: "user",
+        content: `System one\nSystem two\n\nReturn only JSON matching this schema:\n${JSON.stringify(schema)}`,
+      },
+      { role: "user", content: "Question" },
+      { role: "assistant", content: "Earlier answer" },
+      { role: "user", content: "Follow-up" },
+    ],
+    options: { temperature: 0 },
+  });
+  assert.deepEqual(JSON.parse(openAiRequest.body), {
+    model: "openai-model",
+    reasoning: { effort: "medium" },
+    instructions: "System one\nSystem two",
+    input: [
+      { role: "user", content: "Question" },
+      { role: "assistant", content: "Earlier answer" },
+      { role: "user", content: "Follow-up" },
+    ],
+    text: {
+      format: {
+        type: "json_schema",
+        name: "tps_gateway_result",
+        strict: true,
+        schema,
+      },
+    },
+  });
+  assert.deepEqual(JSON.parse(geminiRequest.body), {
+    system_instruction: { parts: [{ text: "System one\nSystem two" }] },
+    contents: [
+      { role: "user", parts: [{ text: "Question" }] },
+      { role: "model", parts: [{ text: "Earlier answer" }] },
+      { role: "user", parts: [{ text: "Follow-up" }] },
+    ],
+    generationConfig: {
+      responseMimeType: "application/json",
+      responseJsonSchema: schema,
+    },
+  });
 });
 
 test("gateway bounds stalled providers and redacts credential-bearing failures", async () => {

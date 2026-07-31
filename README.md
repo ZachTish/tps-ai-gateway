@@ -1,5 +1,13 @@
 # TPS AI Gateway
 
+## 0.2.4
+
+- Ollama, OpenAI, and Gemini now partition system instructions from conversational messages in one shared pass instead of filtering the complete message array twice.
+- Provider order, intentional fallback, timeouts, credentials, models, schemas, request payloads, response extraction, queue behavior, settings, and public APIs are unchanged.
+- Exact `0.2.3` and candidate provider modules matched across 75,021 stubbed provider calls over 25,007 explicit and seeded message arrays, including empty, all-system, no-system, interleaved, Unicode, NUL, frozen, and sparse inputs. No live provider request was sent.
+- The focused request-shape regression passed before and after the runtime edit. The final helper stays internal, adds no cache or state, halves full-array role classification, and reduces the production bundle by 52 bytes. Large synthetic provider-boundary medians improved 4.1% for Ollama, 9.2% for OpenAI, and 8.6% for Gemini; ordinary provider latency remains dominated by transport and model execution.
+- This backward-compatible performance patch keeps the minimum supported Obsidian version at 1.12.0 and requires no settings or data migration.
+
 ## 0.2.3
 
 - Controller queue scans now snapshot only Markdown descendants of `_assets/TPS AI Queue` through Obsidian's public folder APIs instead of enumerating every Markdown file in the vault every 30 seconds.
@@ -94,6 +102,7 @@ Capability handlers are registered at runtime and removed when their owner unloa
 
 ## Version notes
 
+- 0.2.4: Consolidated duplicate provider message classification into one internal pass while preserving exact request and response behavior across Ollama, OpenAI, and Gemini.
 - 0.2.3: Replaced every Controller whole-vault Markdown queue scan with one supported recursive queue-folder snapshot, preserving nested jobs and all released queue/provider behavior while making scan work proportional to the queue subtree.
 - 0.2.2: Isolated individual Controller queue-file failures so later jobs continue in order, with a path-scoped diagnostic and no retry, concurrency, or provider-fallback changes.
 - 0.2.1: Preserved queue-file changes that arrive during an active Controller scan with one bounded serialized trailing pass, deferring later bursts and rechecking Controller authority without changing queue or provider behavior.
