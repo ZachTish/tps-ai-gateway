@@ -1,5 +1,12 @@
 # TPS AI Gateway
 
+## 0.4.0
+
+- `completeStructured()` now supports optional `grounding: "google-search"` for Gemini. The Gateway performs one Google-grounded evidence pass, then a separate schema-constrained extraction pass so the existing Gemini 2.5 Flash default can return validated JSON without pretending unsupported tool/schema combinations are available.
+- Grounded results include a bounded, deduplicated list of the actual HTTP(S) grounding sources. Retrieved content is explicitly treated as untrusted data, and callers remain responsible for domain validation before any mutation.
+- Grounded work is Gemini-only, rejects inline images, uses the existing durable queue for text recovery, and now records durable intent on newly submitted jobs so a synchronized result can resume after an app restart. Existing structured, image, capability, provider, credential, and queue contracts remain backward compatible.
+- The public `features.googleSearchGrounding` flag lets callers fail closed against an older Gateway. Minimum supported Obsidian remains 1.12.0; no settings migration is required.
+
 ## 0.3.1
 
 - Text callers can provide a stable `durableJobId`. The request is written to the existing synced Markdown queue before inference, so the caller can reopen Obsidian and resume the same schema-validated result instead of starting over.
@@ -59,6 +66,7 @@ Canonical source, tests, Git metadata, and dependencies live in `/Users/zachtish
 - 2026-07-30 targeted-queue validation: the exact 0.2.2 release passed all 20 tests and its contained build before modification. Version 0.2.3 passed 24 tests covering recursive non-lexical order, missing folders and path collisions, snapshot materialization, enumeration faults, coalescing, authority loss, and file-level isolation. The exact-version benchmark preserved queue read order and maximum concurrency of one while eliminating all whole-vault enumeration. The required final build deployed only to the test vault; Obsidian 1.12.7 was reloaded without changing credentials or sending a provider request. Runtime `data.json` remained byte-identical at SHA-256 `6cfa72987ad1b642a8368b6c342a0b22d39fcab83af988b13e77c9398baee42b`; production was not accessed.
 - 2026-08-16 device-local/media validation: all 26 gateway checks passed, including Gemini inline-image shape, structured schema, MIME/base64 bounds, unsupported-provider rejection, device-local user-role routing, Ollama exclusion, text queue fallback, and image no-queue behavior. The required separate build was byte-stable and deployed only to the isolated test runtime. Obsidian 1.13.7 reloaded the test vault and showed the revised Gemini setting as device-local structured text/image ownership. The isolated vault intentionally has no linked Gemini secret, so no live provider call or credential change occurred. Source/runtime artifacts were byte-identical, and production was not accessed or promoted.
 - 2026-08-16 durable multi-device validation: all 28 gateway checks passed, including stable-ID resume and collision rejection, requester-first claiming, delayed recovery by another AI-enabled device, abandoned-work recovery, exact eligible-provider execution, image no-queue guards, and prior queue/provider/settings coverage. The mandatory separate build was byte-stable after deploying only to the isolated runtime. Obsidian 1.13.7 reloaded the final artifacts and registered Health's Describe workflow without changing credentials or sending a provider request; production plugin files were not accessed or promoted.
+- 2026-08-16 grounding validation: all 29 Gateway checks passed, including the Gemini Google Search tool request, separate schema-constrained extraction, untrusted-evidence boundary, safe source filtering, Gemini-only device routing, image incompatibility, exact durable-request matching, completed-result recovery, and the existing provider/queue/settings contracts. The build deployed only to the isolated test runtime, and Health 0.11.0 feature-detected `googleSearchGrounding` before exposing its wider product research path. The isolated vault did not send a grounded Gemini request or change credentials; production was not accessed.
 
 ## Install with BRAT
 
@@ -70,7 +78,7 @@ TPS AI Gateway requires Obsidian 1.12.0 or newer because its cloud-credential co
 
 ## Contract
 
-- `completeStructured()` sends multi-turn messages through an ordered provider chain and validates the returned JSON against the caller's schema. Callers may attach guarded inline image media when explicitly requesting Gemini.
+- `completeStructured()` sends multi-turn messages through an ordered provider chain and validates the returned JSON against the caller's schema. Callers may attach guarded inline image media when explicitly requesting Gemini, or request Gemini-only Google grounding for text with `grounding: "google-search"`.
 - `choose()` lets a model select exactly one caller-provided stable option ID. Labels are presentation; IDs are authority boundaries.
 - `registerCapability()` lets a domain plugin expose one described, schema-constrained operation and supplies the only function allowed to execute it.
 - `proposeCapability()` lets the model choose among an explicit capability allowlist and prepare schema-valid input.
@@ -98,7 +106,7 @@ The API is available as the enabled plugin's `api` and as `app.tpsAiGateway`:
 - `proposeCapability(request)`
 - `executeCapability(proposal, context)`
 
-Every request requires a stable `taskId`, messages, and a response schema. Optional `media` entries contain a supported image MIME type plus raw base64 data; optional `preferredProviders` should select Gemini for image work. Results include provider, model, trace ID, and attempt count for concise diagnostics.
+Every request requires a stable `taskId`, messages, and a response schema. Optional `media` entries contain a supported image MIME type plus raw base64 data; optional `preferredProviders` should select Gemini for image work. Optional `grounding: "google-search"` runs a bounded Gemini evidence pass followed by schema extraction and cannot be combined with media. Results include provider, model, trace ID, attempt count, and—when grounded—the returned source title/URL pairs. Callers can feature-detect this contract through `api.features.googleSearchGrounding`.
 
 ## Safety and extensibility
 
@@ -111,6 +119,7 @@ Capability handlers are registered at runtime and removed when their owner unloa
 - Stalled-provider timeout/fallback and credential-redaction tests
 - Caller-controlled metadata privacy regression
 - Gemini inline-image request shape, MIME/base64/size guards, device-local routing, and no-queue image regression
+- Gemini Google-grounding request shape, separate schema extraction, source filtering, device-local routing, and durable resume regression
 - Proposal-versus-execution guard tests
 - Plaintext-key-to-SecretStorage migration and non-overwrite tests
 - Targeted recursive queue enumeration, snapshot, missing-folder/path-collision, and enumeration-failure tests
@@ -120,6 +129,7 @@ Capability handlers are registered at runtime and removed when their owner unloa
 
 ## Version notes
 
+- 0.4.0: Added Gemini Google Search grounding with separate schema extraction, real grounding sources, durable queue compatibility, and an explicit public feature flag.
 - 0.3.1: Added caller-owned durable structured-text jobs that survive an app close and may be completed by any synced device with an eligible local cloud credential, while keeping inline images device-local.
 - 0.3.0: Added guarded Gemini inline-image requests and device-local cloud execution on user-role devices while keeping text-only Controller fallback and prohibiting image queue persistence.
 - 0.2.4: Consolidated duplicate provider message classification into one internal pass while preserving exact request and response behavior across Ollama, OpenAI, and Gemini.

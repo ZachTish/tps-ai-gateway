@@ -153,8 +153,9 @@ test("gateway owns provider transport and fallback", () => {
   assert.match(main, /assertSchema\(data, request\.schema\)/);
   assert.match(providers, /credentials\.openAiApiKey/);
   assert.match(providers, /credentials\.geminiApiKey/);
-  assert.match(providers, /"x-goog-api-key": credentials\.geminiApiKey/);
+  assert.match(providers, /"x-goog-api-key": apiKey/);
   assert.doesNotMatch(providers, /generateContent\?key=/);
+  assert.match(main, /features: \{ googleSearchGrounding: true \}/);
 });
 
 test("all providers preserve system and conversational message request shapes", async () => {
@@ -315,6 +316,68 @@ test("Gemini receives guarded inline images with structured output while text-on
   }]);
   assert.equal(body.generationConfig.responseMimeType, "application/json");
   assert.deepEqual(body.generationConfig.responseJsonSchema, schema);
+});
+
+test("Gemini grounds product research before a separate schema-validated extraction", async () => {
+  const requests = [];
+  const imported = await importProvidersModule(async (options) => {
+    requests.push(options);
+    if (requests.length === 1) {
+      return {
+        json: {
+          candidates: [{
+            content: { parts: [{ text: "Clubtails lists Blue Hawaiian as 16 oz and 10% ABV. Nutrition listings conflict." }] },
+            groundingMetadata: {
+              groundingChunks: [
+                { web: { title: "Clubtails Blue Hawaiian", uri: "https://clubtails.example/blue-hawaiian" } },
+                { web: { title: "Nutrition listing", uri: "https://nutrition.example/clubtails" } },
+                { web: { title: "Duplicate", uri: "https://clubtails.example/blue-hawaiian" } },
+                { web: { title: "Unsafe", uri: "javascript:alert(1)" } },
+              ],
+            },
+          }],
+        },
+      };
+    }
+    return { json: { candidates: [{ content: { parts: [{ text: '{"found":true}' }] } }] } };
+  });
+  const settings = { geminiModel: "gemini-2.5-flash" };
+  const credentials = { openAiApiKey: "", geminiApiKey: "gemini-secret" };
+  const messages = [
+    { role: "system", content: "Research an exact packaged product." },
+    { role: "user", content: "Clubtails Blue Hawaiian" },
+  ];
+  const schema = { type: "object", additionalProperties: false, required: ["found"], properties: { found: { type: "boolean" } } };
+  try {
+    assert.deepEqual(
+      await imported.module.callProvider("gemini", settings, credentials, messages, schema, [], "google-search"),
+      {
+        text: '{"found":true}',
+        model: "gemini-2.5-flash",
+        sources: [
+          { title: "Clubtails Blue Hawaiian", url: "https://clubtails.example/blue-hawaiian" },
+          { title: "Nutrition listing", url: "https://nutrition.example/clubtails" },
+        ],
+      },
+    );
+    await assert.rejects(
+      () => imported.module.callProvider("openai", settings, credentials, messages, schema, [], "google-search"),
+      /does not support Google Search grounding/,
+    );
+  } finally {
+    imported.cleanup();
+  }
+  assert.equal(requests.length, 2);
+  const groundedBody = JSON.parse(requests[0].body);
+  assert.deepEqual(groundedBody.tools, [{ google_search: {} }]);
+  assert.equal(groundedBody.generationConfig.temperature, 0);
+  assert.equal("responseJsonSchema" in groundedBody.generationConfig, false);
+  const extractionBody = JSON.parse(requests[1].body);
+  assert.equal(extractionBody.generationConfig.responseMimeType, "application/json");
+  assert.deepEqual(extractionBody.generationConfig.responseJsonSchema, schema);
+  assert.match(extractionBody.system_instruction.parts[0].text, /untrusted data/);
+  assert.match(extractionBody.contents.at(-1).parts[0].text, /Nutrition listings conflict/);
+  assert.match(extractionBody.contents.at(-1).parts[0].text, /https:\/\/clubtails\.example\/blue-hawaiian/);
 });
 
 test("gateway bounds stalled providers and redacts credential-bearing failures", async () => {
@@ -614,13 +677,15 @@ test("gateway uses device-local cloud credentials and reserves durable text work
   const base = { taskId: "device-local", messages: [{ role: "user", content: "Return ok." }], schema: { type: "object" } };
   assert.equal((await plugin.completeStructured(base)).traceId, "local");
   assert.equal((await plugin.completeStructured({ ...base, preferredProviders: ["gemini"], media: [{ mimeType: "image/jpeg", data: "aGVsbG8=" }] })).traceId, "local");
-  assert.equal(localCalls, 2);
+  assert.equal((await plugin.completeStructured({ ...base, preferredProviders: ["gemini"], grounding: "google-search" })).traceId, "local");
+  assert.equal(localCalls, 3);
   assert.equal(remoteCalls, 0);
   assert.equal((await plugin.completeStructured({ ...base, durableJobId: "describe-food-job-123" })).traceId, "durable");
   assert.equal(durableCalls, 1);
   await assert.rejects(() => plugin.completeStructured({ ...base, durableJobId: "short" }), /durableJobId is invalid/);
   await assert.rejects(() => plugin.completeStructured({ ...base, durableJobId: "describe-food-image-123", media: [{ mimeType: "image/jpeg", data: "aGVsbG8=" }] }), /cannot contain images/);
-  assert.deepEqual(localRequests.map((request) => request.preferredProviders), [["gemini"], ["gemini"]], "a user-role device must not stall on local Ollama when device Gemini is available");
+  await assert.rejects(() => plugin.completeStructured({ ...base, grounding: "google-search", media: [{ mimeType: "image/jpeg", data: "aGVsbG8=" }] }), /cannot be combined with inline images/);
+  assert.deepEqual(localRequests.map((request) => request.preferredProviders), [["gemini"], ["gemini"], ["gemini"]], "a user-role device must not stall on local Ollama when device Gemini is available");
   assert.doesNotThrow(() => validateInlineMedia({ ...base, media: [{ mimeType: "image/webp", data: "aGVsbG8=" }] }));
   assert.throws(() => validateInlineMedia({ ...base, media: [{ mimeType: "image/gif", data: "aGVsbG8=" }] }), /Unsupported inline image type/);
 
@@ -669,6 +734,7 @@ test("durable jobs resume completed results and user-role workers stay on eligib
     durableJobId: "describe-food-durable-123",
     messages: [{ role: "user", content: "oatmeal and berries" }],
     schema: { type: "object", additionalProperties: false, required: ["ok"], properties: { ok: { type: "boolean" } } },
+    grounding: "google-search",
     preferredProviders: ["gemini"],
     metadata: { workflow: "describe-food" },
   };
@@ -683,6 +749,7 @@ test("durable jobs resume completed results and user-role workers stay on eligib
     durable: true,
     messages: request.messages,
     schema: request.schema,
+    grounding: request.grounding,
     preferredProviders: request.preferredProviders,
     metadata: request.metadata,
     result: { data: { ok: true }, provider: "gemini", model: "gemini-model", traceId: "trace", attempts: 1 },
@@ -697,6 +764,21 @@ test("durable jobs resume completed results and user-role workers stay on eligib
   const resumed = await plugin.completeStructuredDurably(request);
   assert.deepEqual(resumed.data, { ok: true });
   await assert.rejects(() => plugin.completeStructuredDurably({ ...request, messages: [{ role: "user", content: "different" }] }), /different request/);
+  await assert.rejects(() => plugin.completeStructuredDurably({ ...request, grounding: undefined }), /different request/);
+
+  let submittedJob;
+  const submittingPlugin = Object.create(GatewayPlugin.prototype);
+  submittingPlugin.app = { vault: { getAbstractFileByPath: () => null } };
+  submittingPlugin.getDeviceId = () => "requesting-device";
+  submittingPlugin.createRemoteJob = async (job) => {
+    submittedJob = job;
+    return queueFile(`${REMOTE_AI_QUEUE_FOLDER}/${job.id}.md`);
+  };
+  submittingPlugin.scheduleRemoteQueueScan = () => {};
+  submittingPlugin.waitForRemoteJob = async () => completeJob.result;
+  await submittingPlugin.completeStructuredDurably(request);
+  assert.equal(submittedJob.durable, true, "new durable jobs must remain resumable after they sync and the app reopens");
+  assert.equal(submittedJob.grounding, "google-search");
 
   const writes = [];
   let exactProviders;

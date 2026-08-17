@@ -33,6 +33,7 @@ export default class TpsAiGatewayPlugin extends Plugin {
   async onload(): Promise<void> {
     await this.loadSettings();
     this.api = {
+      features: { googleSearchGrounding: true },
       completeStructured: <T>(request: StructuredRequest) => this.completeStructured<T>(request),
       choose: <T>(request: Omit<StructuredRequest, "schema"> & { options: DecisionOption<T>[] }) => this.choose<T>(request),
       registerCapability: <TInput, TOutput>(capability: GatewayCapability<TInput, TOutput>) => this.registerCapability(capability as GatewayCapability),
@@ -67,6 +68,8 @@ export default class TpsAiGatewayPlugin extends Plugin {
     if (!request.taskId.trim()) throw new Error("AI gateway taskId is required.");
     if (!request.messages.length) throw new Error("AI gateway messages are required.");
     validateInlineMedia(request);
+    if (request.grounding && request.grounding !== "google-search") throw new Error("Unsupported AI grounding mode.");
+    if (request.grounding && request.media?.length) throw new Error("Google Search grounding cannot be combined with inline images.");
     if (request.durableJobId) {
       if (request.media?.length) throw new Error("Durable AI requests cannot contain images.");
       if (!DURABLE_JOB_ID_PATTERN.test(request.durableJobId)) throw new Error("AI gateway durableJobId is invalid.");
@@ -83,6 +86,9 @@ export default class TpsAiGatewayPlugin extends Plugin {
 
   private deviceLocalCloudProviders(request: StructuredRequest): AiProviderId[] {
     const requested = request.preferredProviders?.length ? request.preferredProviders : this.settings.providerOrder;
+    if (request.grounding) {
+      return requested.includes("gemini") && this.readSecret(this.settings.geminiApiKeySecret) ? ["gemini"] : [];
+    }
     if (request.media?.length) {
       return requested.includes("gemini") && this.readSecret(this.settings.geminiApiKeySecret) ? ["gemini"] : [];
     }
@@ -92,8 +98,12 @@ export default class TpsAiGatewayPlugin extends Plugin {
 
   private async completeStructuredLocally<T>(request: StructuredRequest, exactProviders?: AiProviderId[]): Promise<StructuredResult<T>> {
     const traceId = makeTraceId(request.taskId);
-    const requested = request.preferredProviders?.length ? request.preferredProviders : this.settings.providerOrder;
-    const providers = exactProviders?.length ? [...new Set(exactProviders)] : [...new Set([...requested, ...this.settings.providerOrder])];
+    const requested = request.grounding
+      ? ["gemini" as const]
+      : request.preferredProviders?.length ? request.preferredProviders : this.settings.providerOrder;
+    const providers = exactProviders?.length
+      ? [...new Set(exactProviders)]
+      : request.grounding ? ["gemini" as const] : [...new Set([...requested, ...this.settings.providerOrder])];
     const failures: string[] = [];
     let attempts = 0;
     const credentials = {
@@ -105,6 +115,7 @@ export default class TpsAiGatewayPlugin extends Plugin {
       taskId: request.taskId,
       providers,
       messageCount: request.messages.length,
+      grounded: Boolean(request.grounding),
       ...logger.metadataSummary(request.metadata),
     });
     for (const provider of providers) {
@@ -112,13 +123,13 @@ export default class TpsAiGatewayPlugin extends Plugin {
       try {
         const response = await withProviderTimeout(
           provider,
-          callProvider(provider, this.settings, credentials, request.messages, request.schema, request.media),
+          callProvider(provider, this.settings, credentials, request.messages, request.schema, request.media, request.grounding),
         );
         if (!response.text) throw new Error("Provider returned no structured result.");
         const data = JSON.parse(response.text) as T;
         assertSchema(data, request.schema);
         logger.flow("Request", "success", { traceId, taskId: request.taskId, provider, model: response.model, attempts });
-        return { data, provider, model: response.model, traceId, attempts };
+        return { data, provider, model: response.model, traceId, attempts, sources: response.sources };
       } catch (error) {
         const summary = logger.errorSummary(error, [credentials.openAiApiKey, credentials.geminiApiKey]);
         failures.push(`${provider}: ${summary}`);
@@ -142,6 +153,7 @@ export default class TpsAiGatewayPlugin extends Plugin {
       durable: true,
       messages: request.messages,
       schema: request.schema,
+      grounding: request.grounding,
       preferredProviders: request.preferredProviders,
       metadata: request.metadata,
     };
@@ -178,8 +190,10 @@ export default class TpsAiGatewayPlugin extends Plugin {
       createdAt: now,
       updatedAt: now,
       status: "pending",
+      durable: true,
       messages: request.messages,
       schema: request.schema,
+      grounding: request.grounding,
       preferredProviders: request.preferredProviders,
       metadata: request.metadata,
     };
@@ -288,7 +302,7 @@ export default class TpsAiGatewayPlugin extends Plugin {
     await this.app.vault.modify(file, JSON.stringify(claimed, null, 2));
     logger.flow("RemoteQueue", "claimed", { jobId: job.id, taskId: job.taskId });
     try {
-      const request = { taskId: job.taskId, messages: job.messages, schema: job.schema, preferredProviders: job.preferredProviders, metadata: job.metadata };
+      const request = { taskId: job.taskId, messages: job.messages, schema: job.schema, grounding: job.grounding, preferredProviders: job.preferredProviders, metadata: job.metadata };
       const result = await this.completeStructuredLocally(request, this.isControllerDevice() ? undefined : localProviders);
       const completed: RemoteAiJob = { ...claimed, status: "complete", updatedAt: new Date().toISOString(), result };
       await this.app.vault.modify(file, JSON.stringify(completed, null, 2));
@@ -342,6 +356,7 @@ export default class TpsAiGatewayPlugin extends Plugin {
       taskId: job.taskId,
       messages: job.messages,
       schema: job.schema,
+      grounding: job.grounding,
       preferredProviders: job.preferredProviders,
       metadata: job.metadata,
     });
@@ -472,6 +487,7 @@ function remoteJobMatchesRequest(job: RemoteAiJob, request: StructuredRequest): 
     && job.taskId === request.taskId
     && JSON.stringify(job.messages) === JSON.stringify(request.messages)
     && JSON.stringify(job.schema) === JSON.stringify(request.schema)
+    && job.grounding === request.grounding
     && JSON.stringify(job.preferredProviders || []) === JSON.stringify(request.preferredProviders || [])
     && JSON.stringify(job.metadata || {}) === JSON.stringify(request.metadata || {});
 }

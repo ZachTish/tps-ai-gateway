@@ -1,4 +1,4 @@
-import type { AiMessage, AiProviderId, StructuredResult } from "./types";
+import type { AiGroundingMode, AiMessage, AiProviderId, StructuredResult } from "./types";
 
 export const REMOTE_AI_QUEUE_FOLDER = "_assets/TPS AI Queue";
 export const REMOTE_AI_WAIT_TIMEOUT_MS = 20 * 60 * 1000;
@@ -16,6 +16,7 @@ export interface RemoteAiJob {
   durable?: boolean;
   messages: AiMessage[];
   schema: Record<string, unknown>;
+  grounding?: AiGroundingMode;
   preferredProviders?: AiProviderId[];
   metadata?: Record<string, string | number | boolean>;
   controllerDeviceId?: string;

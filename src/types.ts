@@ -28,6 +28,13 @@ export interface AiInlineMedia {
   data: string;
 }
 
+export type AiGroundingMode = "google-search";
+
+export interface AiGroundingSource {
+  title: string;
+  url: string;
+}
+
 export interface StructuredRequest {
   taskId: string;
   messages: AiMessage[];
@@ -39,6 +46,8 @@ export interface StructuredRequest {
    */
   durableJobId?: string;
   media?: AiInlineMedia[];
+  /** Run a bounded Gemini web-grounding pass before schema extraction. */
+  grounding?: AiGroundingMode;
   preferredProviders?: AiProviderId[];
   metadata?: Record<string, string | number | boolean>;
 }
@@ -49,6 +58,7 @@ export interface StructuredResult<T> {
   model: string;
   traceId: string;
   attempts: number;
+  sources?: AiGroundingSource[];
 }
 
 export interface DecisionOption<T = unknown> {
@@ -85,6 +95,9 @@ export interface CapabilityProposal<TInput = unknown> {
 }
 
 export interface TpsAiGatewayApi {
+  readonly features: {
+    readonly googleSearchGrounding: true;
+  };
   completeStructured<T>(request: StructuredRequest): Promise<StructuredResult<T>>;
   choose<T>(request: Omit<StructuredRequest, "schema"> & { options: DecisionOption<T>[] }): Promise<DecisionResult<T>>;
   registerCapability<TInput, TOutput>(capability: GatewayCapability<TInput, TOutput>): () => void;
