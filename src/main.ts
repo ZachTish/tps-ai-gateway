@@ -17,6 +17,9 @@ import type { AiGatewaySettings, AiProviderId, CapabilityContext, CapabilityProp
 const INLINE_MEDIA_MAX_ITEMS = 3;
 const INLINE_MEDIA_MAX_BASE64_CHARACTERS = 16 * 1024 * 1024;
 const INLINE_MEDIA_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const DURABLE_JOB_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{7,159}$/i;
+const DURABLE_REMOTE_WORKER_BASE_DELAY_MS = 15_000;
+const DURABLE_REMOTE_WORKER_JITTER_MS = 30_000;
 
 export default class TpsAiGatewayPlugin extends Plugin {
   settings: AiGatewaySettings = DEFAULT_SETTINGS;
@@ -64,6 +67,11 @@ export default class TpsAiGatewayPlugin extends Plugin {
     if (!request.taskId.trim()) throw new Error("AI gateway taskId is required.");
     if (!request.messages.length) throw new Error("AI gateway messages are required.");
     validateInlineMedia(request);
+    if (request.durableJobId) {
+      if (request.media?.length) throw new Error("Durable AI requests cannot contain images.");
+      if (!DURABLE_JOB_ID_PATTERN.test(request.durableJobId)) throw new Error("AI gateway durableJobId is invalid.");
+      return this.completeStructuredDurably<T>(request);
+    }
     if (!this.isControllerDevice()) {
       const localCloudProviders = this.deviceLocalCloudProviders(request);
       if (localCloudProviders.length) return this.completeStructuredLocally<T>({ ...request, preferredProviders: localCloudProviders });
@@ -82,10 +90,10 @@ export default class TpsAiGatewayPlugin extends Plugin {
       || (provider === "gemini" && Boolean(this.readSecret(this.settings.geminiApiKeySecret))));
   }
 
-  private async completeStructuredLocally<T>(request: StructuredRequest): Promise<StructuredResult<T>> {
+  private async completeStructuredLocally<T>(request: StructuredRequest, exactProviders?: AiProviderId[]): Promise<StructuredResult<T>> {
     const traceId = makeTraceId(request.taskId);
     const requested = request.preferredProviders?.length ? request.preferredProviders : this.settings.providerOrder;
-    const providers = [...new Set([...requested, ...this.settings.providerOrder])];
+    const providers = exactProviders?.length ? [...new Set(exactProviders)] : [...new Set([...requested, ...this.settings.providerOrder])];
     const failures: string[] = [];
     let attempts = 0;
     const credentials = {
@@ -131,6 +139,7 @@ export default class TpsAiGatewayPlugin extends Plugin {
       createdAt: now,
       updatedAt: now,
       status: "pending",
+      durable: true,
       messages: request.messages,
       schema: request.schema,
       preferredProviders: request.preferredProviders,
@@ -138,10 +147,47 @@ export default class TpsAiGatewayPlugin extends Plugin {
     };
     const file = await this.createRemoteJob(job);
     logger.flow("RemoteQueue", "submitted", { jobId, taskId: request.taskId, path: file.path });
-    new Notice("Sent to the Controller. This can take a few minutes.", 7000);
+    new Notice("Sent to the synced AI queue. Another AI-enabled device can finish it.", 7000);
     const result = await this.waitForRemoteJob<T>(file.path, request.schema);
     this.app.workspace.trigger("tps:ai-remote-job-completed" as any, { sourcePluginId: this.manifest.id, timestamp: Date.now(), jobId, taskId: request.taskId });
     return result;
+  }
+
+  private async completeStructuredDurably<T>(request: StructuredRequest): Promise<StructuredResult<T>> {
+    const jobId = request.durableJobId!;
+    const path = remoteAiJobPath(jobId);
+    const existing = this.app.vault.getAbstractFileByPath(path);
+    if (existing instanceof TFile) {
+      const job = parseRemoteAiJob(await this.app.vault.read(existing));
+      if (!job || !remoteJobMatchesRequest(job, request)) throw new Error("AI durable job id belongs to a different request.");
+      if (job.status === "complete" && job.result) {
+        assertSchema(job.result.data, request.schema);
+        logger.flow("RemoteQueue", "durable-resumed", { jobId, taskId: request.taskId, provider: job.result.provider, model: job.result.model });
+        return job.result as StructuredResult<T>;
+      }
+      if (job.status === "failed") throw new Error(job.error || "The durable AI request failed.");
+      this.scheduleRemoteQueueScan("durable-resume");
+      return this.waitForRemoteJob<T>(path, request.schema);
+    }
+    const now = new Date().toISOString();
+    const job: RemoteAiJob = {
+      version: 1,
+      id: jobId,
+      taskId: request.taskId,
+      requesterDeviceId: this.getDeviceId(),
+      createdAt: now,
+      updatedAt: now,
+      status: "pending",
+      messages: request.messages,
+      schema: request.schema,
+      preferredProviders: request.preferredProviders,
+      metadata: request.metadata,
+    };
+    const file = await this.createRemoteJob(job);
+    logger.flow("RemoteQueue", "durable-submitted", { jobId, taskId: request.taskId, path: file.path });
+    this.scheduleRemoteQueueScan("durable-submitted");
+    new Notice("Saved this AI request. Another online device can finish it if needed.", 7000);
+    return this.waitForRemoteJob<T>(file.path, request.schema);
   }
 
   private async createRemoteJob(job: RemoteAiJob): Promise<TFile> {
@@ -167,11 +213,13 @@ export default class TpsAiGatewayPlugin extends Plugin {
       }
       await delay(3000);
     }
-    throw new Error("The Controller AI request is still queued. You will receive a notification when it finishes.");
+    const error = new Error("The AI request is still queued. TPS Health will resume it automatically.");
+    (error as any).code = "TPS_AI_JOB_PENDING";
+    throw error;
   }
 
   private scheduleRemoteQueueScan(reason: string): void {
-    if (!this.isControllerDevice() || this.remoteQueueScanTimer !== null) return;
+    if (!this.canProcessRemoteQueue() || this.remoteQueueScanTimer !== null) return;
     this.remoteQueueScanTimer = window.setTimeout(() => {
       this.remoteQueueScanTimer = null;
       void this.scanRemoteQueue(reason);
@@ -189,7 +237,7 @@ export default class TpsAiGatewayPlugin extends Plugin {
   }
 
   private async scanRemoteQueue(reason: string): Promise<void> {
-    if (!this.isControllerDevice()) return;
+    if (!this.canProcessRemoteQueue()) return;
     if (this.remoteQueueScanInFlight) {
       this.remoteQueueRescanRequested = true;
       return;
@@ -197,7 +245,7 @@ export default class TpsAiGatewayPlugin extends Plugin {
     this.remoteQueueScanInFlight = true;
     try {
       for (let pass = 0; pass < 2; pass += 1) {
-        if (pass > 0 && (!this.remoteQueueRescanRequested || !this.isControllerDevice())) break;
+        if (pass > 0 && (!this.remoteQueueRescanRequested || !this.canProcessRemoteQueue())) break;
         this.remoteQueueRescanRequested = false;
         try {
           const files = this.getRemoteQueueMarkdownFiles();
@@ -214,7 +262,7 @@ export default class TpsAiGatewayPlugin extends Plugin {
                 logger.flow("RemoteQueue", "expired", { jobId: job.id, taskId: job.taskId });
                 continue;
               }
-              if (remoteAiJobIsClaimable(job)) await this.processRemoteJob(file, job);
+              if (remoteAiJobIsClaimable(job) && this.canProcessRemoteJob(job)) await this.processRemoteJob(file, job);
             } catch (error) {
               logger.warn("RemoteQueue", "file-scan-failed", { reason, path: file.path, error: logger.errorSummary(error) });
             }
@@ -225,7 +273,7 @@ export default class TpsAiGatewayPlugin extends Plugin {
         reason = "queued";
       }
     } finally {
-      const scheduleFollowUp = this.remoteQueueRescanRequested && this.isControllerDevice();
+      const scheduleFollowUp = this.remoteQueueRescanRequested && this.canProcessRemoteQueue();
       this.remoteQueueRescanRequested = false;
       this.remoteQueueScanInFlight = false;
       if (scheduleFollowUp) this.scheduleRemoteQueueScan("queued-after-trailing");
@@ -233,12 +281,15 @@ export default class TpsAiGatewayPlugin extends Plugin {
   }
 
   private async processRemoteJob(file: TFile, job: RemoteAiJob): Promise<void> {
+    const localProviders = this.remoteJobLocalProviders(job);
+    if (!this.isControllerDevice() && !localProviders.length) return;
     const startedAt = new Date().toISOString();
     const claimed: RemoteAiJob = { ...job, status: "processing", controllerDeviceId: this.getDeviceId(), startedAt, updatedAt: startedAt, error: undefined };
     await this.app.vault.modify(file, JSON.stringify(claimed, null, 2));
     logger.flow("RemoteQueue", "claimed", { jobId: job.id, taskId: job.taskId });
     try {
-      const result = await this.completeStructuredLocally({ taskId: job.taskId, messages: job.messages, schema: job.schema, preferredProviders: job.preferredProviders, metadata: job.metadata });
+      const request = { taskId: job.taskId, messages: job.messages, schema: job.schema, preferredProviders: job.preferredProviders, metadata: job.metadata };
+      const result = await this.completeStructuredLocally(request, this.isControllerDevice() ? undefined : localProviders);
       const completed: RemoteAiJob = { ...claimed, status: "complete", updatedAt: new Date().toISOString(), result };
       await this.app.vault.modify(file, JSON.stringify(completed, null, 2));
       logger.flow("RemoteQueue", "completed", { jobId: job.id, taskId: job.taskId, provider: result.provider, model: result.model });
@@ -264,8 +315,8 @@ export default class TpsAiGatewayPlugin extends Plugin {
       : "TPS AI request";
     const title = succeeded ? `${label} complete` : `${label} failed`;
     const body = succeeded
-      ? `${label} finished on the Controller. Open Obsidian on the requesting device to continue.`
-      : `${label} could not be completed on the Controller.`;
+      ? `${label} finished on an AI-enabled device. Open Obsidian on the requesting device to continue.`
+      : `${label} could not be completed by an AI-enabled device.`;
     try {
       if (notifier?.sendNotification) await notifier.sendNotification(title, body);
       else if (notifier?.sendMessage) await notifier.sendMessage(body, undefined, title);
@@ -278,6 +329,31 @@ export default class TpsAiGatewayPlugin extends Plugin {
   private isControllerDevice(): boolean {
     const controller = (this.app as any).plugins?.getPlugin?.("tps-controller");
     return controller?.api?.isController?.() === true;
+  }
+
+  private canProcessRemoteQueue(): boolean {
+    return this.isControllerDevice()
+      || Boolean(this.readSecret(this.settings.openAiApiKeySecret))
+      || Boolean(this.readSecret(this.settings.geminiApiKeySecret));
+  }
+
+  private remoteJobLocalProviders(job: RemoteAiJob): AiProviderId[] {
+    return this.deviceLocalCloudProviders({
+      taskId: job.taskId,
+      messages: job.messages,
+      schema: job.schema,
+      preferredProviders: job.preferredProviders,
+      metadata: job.metadata,
+    });
+  }
+
+  private canProcessRemoteJob(job: RemoteAiJob): boolean {
+    if (!this.isControllerDevice() && !this.remoteJobLocalProviders(job).length) return false;
+    if (!job.durable || job.requesterDeviceId === this.getDeviceId()) return true;
+    const createdAt = Date.parse(job.createdAt);
+    if (!Number.isFinite(createdAt)) return false;
+    const delayMs = DURABLE_REMOTE_WORKER_BASE_DELAY_MS + stableDeviceDelay(this.getDeviceId(), DURABLE_REMOTE_WORKER_JITTER_MS);
+    return Date.now() - createdAt >= delayMs;
   }
 
   private getDeviceId(): string {
@@ -390,6 +466,16 @@ export function validateInlineMedia(request: StructuredRequest): void {
   if (totalCharacters > INLINE_MEDIA_MAX_BASE64_CHARACTERS) throw new Error("Inline images are too large. Capture smaller photos and try again.");
 }
 
+function remoteJobMatchesRequest(job: RemoteAiJob, request: StructuredRequest): boolean {
+  return job.durable === true
+    && job.id === request.durableJobId
+    && job.taskId === request.taskId
+    && JSON.stringify(job.messages) === JSON.stringify(request.messages)
+    && JSON.stringify(job.schema) === JSON.stringify(request.schema)
+    && JSON.stringify(job.preferredProviders || []) === JSON.stringify(request.preferredProviders || [])
+    && JSON.stringify(job.metadata || {}) === JSON.stringify(request.metadata || {});
+}
+
 class AiGatewaySettingTab extends PluginSettingTab {
   private activeRoute: AiSettingsRoute = "cloud";
 
@@ -478,4 +564,9 @@ function secretReferenceSetting(container: HTMLElement, plugin: TpsAiGatewayPlug
     }));
 }
 function makeTraceId(taskId: string): string { return `${taskId.replace(/[^a-z0-9_-]+/gi, "-").slice(0, 40)}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`; }
+function stableDeviceDelay(deviceId: string, rangeMs: number): number {
+  let hash = 2166136261;
+  for (const character of deviceId) hash = Math.imul(hash ^ character.charCodeAt(0), 16777619);
+  return Math.abs(hash >>> 0) % Math.max(1, rangeMs);
+}
 function delay(ms: number): Promise<void> { return new Promise((resolve) => window.setTimeout(resolve, ms)); }

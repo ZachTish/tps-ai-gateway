@@ -582,16 +582,16 @@ test("gateway separates proposals from guarded execution", () => {
   assert.match(main, /assertSchema\(proposal\.input, capability\.inputSchema\)/);
 });
 
-test("gateway uses device-local cloud credentials before the durable Controller queue", async () => {
+test("gateway uses device-local cloud credentials and reserves durable text work for the synced queue", async () => {
   assert.match(main, /deviceLocalCloudProviders\(request\)/);
   assert.match(main, /Image requests require Gemini to be configured in TPS AI Gateway on this device/);
   assert.match(main, /controller\?\.api\?\.isController\?\.\(\) === true/);
   assert.match(main, /this\.app\.vault\.create\(path, JSON\.stringify\(job, null, 2\)\)/);
   assert.match(main, /remoteAiJobIsClaimable\(job\)/);
-  assert.match(main, /this\.completeStructuredLocally\(\{ taskId: job\.taskId/);
+  assert.match(main, /this\.completeStructuredLocally\(request, this\.isControllerDevice\(\) \? undefined : localProviders\)/);
   assert.match(main, /notifier\?\.sendNotification/);
   assert.match(main, /job\.metadata\?\.notifyOnCompletion === false/);
-  assert.match(main, /Sent to the Controller\. This can take a few minutes\./);
+  assert.match(main, /Sent to the synced AI queue\. Another AI-enabled device can finish it\./);
 
   const { default: GatewayPlugin, validateInlineMedia } = await importGatewayPlugin();
   const plugin = Object.create(GatewayPlugin.prototype);
@@ -604,9 +604,11 @@ test("gateway uses device-local cloud credentials before the durable Controller 
   plugin.readSecret = (name) => name === "gemini-ref" ? "device-gemini-secret" : "";
   let localCalls = 0;
   let remoteCalls = 0;
+  let durableCalls = 0;
   const localRequests = [];
   plugin.completeStructuredLocally = async (request) => { localRequests.push(request); return { data: { ok: true }, provider: "gemini", model: "gemini-model", traceId: "local", attempts: 1 }; };
   plugin.completeStructuredRemotely = async () => { remoteCalls += 1; return { data: { ok: true }, provider: "gemini", model: "remote", traceId: "remote", attempts: 1 }; };
+  plugin.completeStructuredDurably = async () => { durableCalls += 1; return { data: { ok: true }, provider: "gemini", model: "durable", traceId: "durable", attempts: 1 }; };
   const originalLocal = plugin.completeStructuredLocally;
   plugin.completeStructuredLocally = async (...args) => { localCalls += 1; return originalLocal(...args); };
   const base = { taskId: "device-local", messages: [{ role: "user", content: "Return ok." }], schema: { type: "object" } };
@@ -614,6 +616,10 @@ test("gateway uses device-local cloud credentials before the durable Controller 
   assert.equal((await plugin.completeStructured({ ...base, preferredProviders: ["gemini"], media: [{ mimeType: "image/jpeg", data: "aGVsbG8=" }] })).traceId, "local");
   assert.equal(localCalls, 2);
   assert.equal(remoteCalls, 0);
+  assert.equal((await plugin.completeStructured({ ...base, durableJobId: "describe-food-job-123" })).traceId, "durable");
+  assert.equal(durableCalls, 1);
+  await assert.rejects(() => plugin.completeStructured({ ...base, durableJobId: "short" }), /durableJobId is invalid/);
+  await assert.rejects(() => plugin.completeStructured({ ...base, durableJobId: "describe-food-image-123", media: [{ mimeType: "image/jpeg", data: "aGVsbG8=" }] }), /cannot contain images/);
   assert.deepEqual(localRequests.map((request) => request.preferredProviders), [["gemini"], ["gemini"]], "a user-role device must not stall on local Ollama when device Gemini is available");
   assert.doesNotThrow(() => validateInlineMedia({ ...base, media: [{ mimeType: "image/webp", data: "aGVsbG8=" }] }));
   assert.throws(() => validateInlineMedia({ ...base, media: [{ mimeType: "image/gif", data: "aGVsbG8=" }] }), /Unsupported inline image type/);
@@ -621,6 +627,91 @@ test("gateway uses device-local cloud credentials before the durable Controller 
   plugin.readSecret = () => "";
   assert.equal((await plugin.completeStructured(base)).traceId, "remote");
   await assert.rejects(() => plugin.completeStructured({ ...base, preferredProviders: ["gemini"], media: [{ mimeType: "image/jpeg", data: "aGVsbG8=" }] }), /require Gemini/);
+});
+
+test("any device with a matching local cloud credential can finish durable queue work", async () => {
+  const { default: GatewayPlugin } = await importGatewayPlugin();
+  const plugin = Object.create(GatewayPlugin.prototype);
+  plugin.settings = {
+    providerOrder: ["gemini", "openai", "ollama"],
+    geminiApiKeySecret: "gemini-ref",
+    openAiApiKeySecret: "openai-ref",
+  };
+  plugin.isControllerDevice = () => false;
+  plugin.readSecret = (name) => name === "gemini-ref" ? "device-gemini-secret" : "";
+  plugin.getDeviceId = () => "phone";
+  const job = {
+    durable: true,
+    requesterDeviceId: "phone",
+    createdAt: new Date().toISOString(),
+    taskId: "health.describe-food.extract",
+    messages: [{ role: "user", content: "oatmeal and berries" }],
+    schema: { type: "object" },
+    preferredProviders: ["gemini"],
+  };
+  assert.equal(plugin.canProcessRemoteQueue(), true);
+  assert.equal(plugin.canProcessRemoteJob(job), true);
+  assert.deepEqual(plugin.remoteJobLocalProviders(job), ["gemini"]);
+  assert.equal(plugin.canProcessRemoteJob({ ...job, requesterDeviceId: "other-device" }), false, "a non-requester waits so the submitting device can claim first");
+  assert.equal(plugin.canProcessRemoteJob({ ...job, requesterDeviceId: "other-device", createdAt: new Date(Date.now() - 60_000).toISOString() }), true, "an online Gemini device eventually recovers abandoned durable work");
+  plugin.readSecret = () => "";
+  assert.equal(plugin.canProcessRemoteQueue(), false);
+  assert.equal(plugin.canProcessRemoteJob(job), false);
+  assert.match(main, /Saved this AI request\. Another online device can finish it if needed\./);
+  assert.match(main, /TPS_AI_JOB_PENDING/);
+  assert.match(main, /durable-resumed/);
+});
+
+test("durable jobs resume completed results and user-role workers stay on eligible device providers", async () => {
+  const { default: GatewayPlugin } = await importGatewayPlugin();
+  const request = {
+    taskId: "health.describe-food.extract",
+    durableJobId: "describe-food-durable-123",
+    messages: [{ role: "user", content: "oatmeal and berries" }],
+    schema: { type: "object", additionalProperties: false, required: ["ok"], properties: { ok: { type: "boolean" } } },
+    preferredProviders: ["gemini"],
+    metadata: { workflow: "describe-food" },
+  };
+  const completeJob = {
+    version: 1,
+    id: request.durableJobId,
+    taskId: request.taskId,
+    requesterDeviceId: "phone",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    status: "complete",
+    durable: true,
+    messages: request.messages,
+    schema: request.schema,
+    preferredProviders: request.preferredProviders,
+    metadata: request.metadata,
+    result: { data: { ok: true }, provider: "gemini", model: "gemini-model", traceId: "trace", attempts: 1 },
+  };
+  const plugin = Object.create(GatewayPlugin.prototype);
+  plugin.app = {
+    vault: {
+      getAbstractFileByPath: () => queueFile(`${REMOTE_AI_QUEUE_FOLDER}/${request.durableJobId}.md`),
+      read: async () => JSON.stringify(completeJob),
+    },
+  };
+  const resumed = await plugin.completeStructuredDurably(request);
+  assert.deepEqual(resumed.data, { ok: true });
+  await assert.rejects(() => plugin.completeStructuredDurably({ ...request, messages: [{ role: "user", content: "different" }] }), /different request/);
+
+  const writes = [];
+  let exactProviders;
+  plugin.app = { vault: { modify: async (_file, body) => writes.push(JSON.parse(body)) } };
+  plugin.isControllerDevice = () => false;
+  plugin.getDeviceId = () => "gemini-worker";
+  plugin.remoteJobLocalProviders = () => ["gemini"];
+  plugin.completeStructuredLocally = async (_request, providers) => {
+    exactProviders = providers;
+    return completeJob.result;
+  };
+  plugin.notifyRemoteJob = async () => {};
+  await plugin.processRemoteJob(queueFile(`${REMOTE_AI_QUEUE_FOLDER}/worker.md`), { ...completeJob, id: "worker", status: "pending", result: undefined });
+  assert.deepEqual(exactProviders, ["gemini"]);
+  assert.deepEqual(writes.map((job) => job.status), ["processing", "complete"]);
 });
 
 test("remote queue validates jobs, reclaims stale work, and expires retained results", () => {
@@ -1026,7 +1117,7 @@ test("remote queue bounds an active epoch and defers work raised during its trai
   assert.equal(plugin.remoteQueueRescanRequested, false);
 });
 
-test("remote queue skips a requested trailing pass after controller authority is lost", async () => {
+test("remote queue skips a requested trailing pass after all processing authority is lost", async () => {
   const { default: GatewayPlugin } = await importGatewayPlugin();
   const firstReadEntered = deferred();
   const allowFirstRead = deferred();
@@ -1037,6 +1128,8 @@ test("remote queue skips a requested trailing pass after controller authority is
   const plugin = Object.create(GatewayPlugin.prototype);
   plugin.remoteQueueScanInFlight = false;
   plugin.remoteQueueRescanRequested = false;
+  plugin.settings = { openAiApiKeySecret: "", geminiApiKeySecret: "" };
+  plugin.readSecret = () => "";
   plugin.isControllerDevice = () => isController;
   plugin.scheduleRemoteQueueScan = (reason) => scheduledReasons.push(reason);
   plugin.app = {

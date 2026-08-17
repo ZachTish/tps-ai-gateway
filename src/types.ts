@@ -32,6 +32,12 @@ export interface StructuredRequest {
   taskId: string;
   messages: AiMessage[];
   schema: Record<string, unknown>;
+  /**
+   * Stable caller-owned id for text work that must survive an app close. Durable
+   * requests are written to the synced queue and may be completed by any device
+   * with an eligible local cloud credential.
+   */
+  durableJobId?: string;
   media?: AiInlineMedia[];
   preferredProviders?: AiProviderId[];
   metadata?: Record<string, string | number | boolean>;

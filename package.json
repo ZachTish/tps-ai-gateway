@@ -1,6 +1,6 @@
 {
   "name": "tps-ai-gateway",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "AI transport and guarded decision gateway for TPS plugins.",
   "main": "main.js",
   "scripts": {
