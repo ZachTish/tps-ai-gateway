@@ -281,6 +281,42 @@ test("all providers preserve system and conversational message request shapes", 
   });
 });
 
+test("Gemini receives guarded inline images with structured output while text-only providers fail closed", async () => {
+  const requests = [];
+  const imported = await importProvidersModule(async (options) => {
+    requests.push(options);
+    return { json: { candidates: [{ content: { parts: [{ text: '{"ok":true}' }] } }] } };
+  });
+  const settings = {
+    ollamaEnabled: true,
+    ollamaUrl: "http://127.0.0.1:11434",
+    ollamaModel: "local-model",
+    openAiModel: "openai-model",
+    geminiModel: "gemini-model",
+  };
+  const credentials = { openAiApiKey: "openai-secret", geminiApiKey: "gemini-secret" };
+  const messages = [{ role: "system", content: "Extract the label." }, { role: "user", content: "Return the visible values." }];
+  const schema = { type: "object", additionalProperties: false, required: ["ok"], properties: { ok: { type: "boolean" } } };
+  const media = [{ mimeType: "image/jpeg", data: "aGVsbG8=" }];
+  try {
+    assert.deepEqual(await imported.module.callProvider("gemini", settings, credentials, messages, schema, media), { text: '{"ok":true}', model: "gemini-model" });
+    await assert.rejects(() => imported.module.callProvider("openai", settings, credentials, messages, schema, media), /does not support TPS inline image requests/);
+  } finally {
+    imported.cleanup();
+  }
+  assert.equal(requests.length, 1);
+  const body = JSON.parse(requests[0].body);
+  assert.deepEqual(body.contents, [{
+    role: "user",
+    parts: [
+      { text: "Return the visible values." },
+      { inline_data: { mime_type: "image/jpeg", data: "aGVsbG8=" } },
+    ],
+  }]);
+  assert.equal(body.generationConfig.responseMimeType, "application/json");
+  assert.deepEqual(body.generationConfig.responseJsonSchema, schema);
+});
+
 test("gateway bounds stalled providers and redacts credential-bearing failures", async () => {
   await assert.rejects(
     () => withProviderTimeout("ollama", new Promise(() => {}), 5),
@@ -546,8 +582,9 @@ test("gateway separates proposals from guarded execution", () => {
   assert.match(main, /assertSchema\(proposal\.input, capability\.inputSchema\)/);
 });
 
-test("gateway routes user-device work through a durable Controller queue", () => {
-  assert.match(main, /if \(!this\.isControllerDevice\(\)\) return this\.completeStructuredRemotely<T>\(request\)/);
+test("gateway uses device-local cloud credentials before the durable Controller queue", async () => {
+  assert.match(main, /deviceLocalCloudProviders\(request\)/);
+  assert.match(main, /Image requests require Gemini to be configured in TPS AI Gateway on this device/);
   assert.match(main, /controller\?\.api\?\.isController\?\.\(\) === true/);
   assert.match(main, /this\.app\.vault\.create\(path, JSON\.stringify\(job, null, 2\)\)/);
   assert.match(main, /remoteAiJobIsClaimable\(job\)/);
@@ -555,6 +592,35 @@ test("gateway routes user-device work through a durable Controller queue", () =>
   assert.match(main, /notifier\?\.sendNotification/);
   assert.match(main, /job\.metadata\?\.notifyOnCompletion === false/);
   assert.match(main, /Sent to the Controller\. This can take a few minutes\./);
+
+  const { default: GatewayPlugin, validateInlineMedia } = await importGatewayPlugin();
+  const plugin = Object.create(GatewayPlugin.prototype);
+  plugin.settings = {
+    providerOrder: ["gemini", "openai", "ollama"],
+    geminiApiKeySecret: "gemini-ref",
+    openAiApiKeySecret: "openai-ref",
+  };
+  plugin.isControllerDevice = () => false;
+  plugin.readSecret = (name) => name === "gemini-ref" ? "device-gemini-secret" : "";
+  let localCalls = 0;
+  let remoteCalls = 0;
+  const localRequests = [];
+  plugin.completeStructuredLocally = async (request) => { localRequests.push(request); return { data: { ok: true }, provider: "gemini", model: "gemini-model", traceId: "local", attempts: 1 }; };
+  plugin.completeStructuredRemotely = async () => { remoteCalls += 1; return { data: { ok: true }, provider: "gemini", model: "remote", traceId: "remote", attempts: 1 }; };
+  const originalLocal = plugin.completeStructuredLocally;
+  plugin.completeStructuredLocally = async (...args) => { localCalls += 1; return originalLocal(...args); };
+  const base = { taskId: "device-local", messages: [{ role: "user", content: "Return ok." }], schema: { type: "object" } };
+  assert.equal((await plugin.completeStructured(base)).traceId, "local");
+  assert.equal((await plugin.completeStructured({ ...base, preferredProviders: ["gemini"], media: [{ mimeType: "image/jpeg", data: "aGVsbG8=" }] })).traceId, "local");
+  assert.equal(localCalls, 2);
+  assert.equal(remoteCalls, 0);
+  assert.deepEqual(localRequests.map((request) => request.preferredProviders), [["gemini"], ["gemini"]], "a user-role device must not stall on local Ollama when device Gemini is available");
+  assert.doesNotThrow(() => validateInlineMedia({ ...base, media: [{ mimeType: "image/webp", data: "aGVsbG8=" }] }));
+  assert.throws(() => validateInlineMedia({ ...base, media: [{ mimeType: "image/gif", data: "aGVsbG8=" }] }), /Unsupported inline image type/);
+
+  plugin.readSecret = () => "";
+  assert.equal((await plugin.completeStructured(base)).traceId, "remote");
+  await assert.rejects(() => plugin.completeStructured({ ...base, preferredProviders: ["gemini"], media: [{ mimeType: "image/jpeg", data: "aGVsbG8=" }] }), /require Gemini/);
 });
 
 test("remote queue validates jobs, reclaims stale work, and expires retained results", () => {

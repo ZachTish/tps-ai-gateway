@@ -1,5 +1,13 @@
 # TPS AI Gateway
 
+## 0.3.0
+
+- `completeStructured()` now accepts up to three guarded inline JPEG, PNG, or WebP images alongside the existing messages and JSON schema. Gemini receives the images as native inline-data parts; Ollama and OpenAI fail closed for image-bearing requests instead of silently dropping media.
+- User-role devices now execute structured requests directly when the requested cloud provider has a device-local SecretStorage credential. This makes TPS Health Describe native on a phone with Gemini/OpenAI configured and lets Nutrition Facts scanning use Gemini on the device that captured the photo.
+- Images are never written into `_assets/TPS AI Queue`. A non-Controller image request without a local Gemini secret returns an actionable configuration error, while text-only work without a local cloud credential retains the durable Controller fallback.
+- Inline media is restricted to supported image MIME types, raw base64 without a data-URL prefix, three images, and 16 MiB of encoded data. Prompts, image bytes, schemas, responses, credentials, and caller metadata remain excluded from diagnostics.
+- This is a backward-compatible API feature release with no settings/data migration. Existing text-only callers and queue jobs remain compatible; Obsidian 1.12.0 remains the minimum supported version.
+
 ## 0.2.4
 
 - Ollama, OpenAI, and Gemini now partition system instructions from conversational messages in one shared pass instead of filtering the complete message array twice.
@@ -42,6 +50,7 @@ Canonical source, tests, Git metadata, and dependencies live in `/Users/zachtish
 - 2026-07-30 queue-scheduler validation: a frozen 0.2.0 regression showed that 100 overlapping scan requests were discarded while a scan was active. Version 0.2.1 instead observed a newly arrived queue file in one serialized trailing pass, bounded an active epoch to two snapshots, deferred a third trigger through the existing debounce, kept maximum read concurrency at one, and skipped the trailing pass after Controller authority was lost. All 19 tests and the required final build passed; the reloaded test-vault settings were inspected without changing credentials or sending a provider request. Runtime `data.json` remained byte-identical, and production was not accessed.
 - 2026-07-30 queue-fault validation: the exact 0.2.1 path attempted only 38 of 100 ordered queue files and processed 37 when file 37 rejected its read. Version 0.2.2 attempted all 100, processed the other 99 in the same order, logged the failed path once, and kept maximum read concurrency at one. All 20 tests and the required final build passed; Obsidian 1.12.7 reloaded the test vault without changing credentials or sending a provider request. Runtime `data.json` remained byte-identical at SHA-256 `6cfa72987ad1b642a8368b6c342a0b22d39fcab83af988b13e77c9398baee42b`, and production was not accessed.
 - 2026-07-30 targeted-queue validation: the exact 0.2.2 release passed all 20 tests and its contained build before modification. Version 0.2.3 passed 24 tests covering recursive non-lexical order, missing folders and path collisions, snapshot materialization, enumeration faults, coalescing, authority loss, and file-level isolation. The exact-version benchmark preserved queue read order and maximum concurrency of one while eliminating all whole-vault enumeration. The required final build deployed only to the test vault; Obsidian 1.12.7 was reloaded without changing credentials or sending a provider request. Runtime `data.json` remained byte-identical at SHA-256 `6cfa72987ad1b642a8368b6c342a0b22d39fcab83af988b13e77c9398baee42b`; production was not accessed.
+- 2026-08-16 device-local/media validation: all 26 gateway checks passed, including Gemini inline-image shape, structured schema, MIME/base64 bounds, unsupported-provider rejection, device-local user-role routing, Ollama exclusion, text queue fallback, and image no-queue behavior. The required separate build was byte-stable and deployed only to the isolated test runtime. Obsidian 1.13.7 reloaded the test vault and showed the revised Gemini setting as device-local structured text/image ownership. The isolated vault intentionally has no linked Gemini secret, so no live provider call or credential change occurred. Source/runtime artifacts were byte-identical, and production was not accessed or promoted.
 
 ## Install with BRAT
 
@@ -53,7 +62,7 @@ TPS AI Gateway requires Obsidian 1.12.0 or newer because its cloud-credential co
 
 ## Contract
 
-- `completeStructured()` sends multi-turn messages through an ordered provider chain and validates the returned JSON against the caller's schema.
+- `completeStructured()` sends multi-turn messages through an ordered provider chain and validates the returned JSON against the caller's schema. Callers may attach guarded inline image media when explicitly requesting Gemini.
 - `choose()` lets a model select exactly one caller-provided stable option ID. Labels are presentation; IDs are authority boundaries.
 - `registerCapability()` lets a domain plugin expose one described, schema-constrained operation and supplies the only function allowed to execute it.
 - `proposeCapability()` lets the model choose among an explicit capability allowlist and prepare schema-valid input.
@@ -64,7 +73,7 @@ TPS AI Gateway requires Obsidian 1.12.0 or newer because its cloud-credential co
 
 Default order: local Ollama (`gemma3:12b`), OpenAI, then Gemini (`gemini-2.5-flash`). Missing, failed, or stalled providers fall through; each provider attempt has a 60-second ceiling so one transport cannot leave the whole request pending forever. Provider configuration lives only in this plugin. OpenAI and Gemini keys are selected through Obsidian SecretStorage and are never written to plugin `data.json`; upgrading from settings version 1 migrates any existing plaintext keys into the default device-local secret entries before purging the legacy fields. Gemini authentication uses the request header rather than a query string, and provider errors are redacted before they reach diagnostics or user notices. API keys, prompts, full responses, vault bodies, and caller-supplied metadata values or field names are not logged. Request-start diagnostics retain only the number of metadata fields alongside task, provider, message-count, and trace information.
 
-On TPS Controller devices, structured requests execute directly through that provider chain. On user-role devices, the gateway writes a versioned Markdown-backed JSON job to `_assets/TPS AI Queue`, using a file type that ordinary Obsidian Sync always carries. The Controller claims pending jobs, reclaims processing jobs whose claim is older than ten minutes, executes and schema-validates the request locally, writes the result or compact redacted failure back to the same job, and sends a TPS Notifier message without including prompt or response content. Every scan synchronously snapshots only Markdown descendants of the queue folder through Obsidian's public recursive traversal; unrelated vault Markdown is never enumerated, and nested jobs retain traversal order. Queue-file changes received during an active scan coalesce into one serialized trailing pass; a later burst returns to the existing debounce, and every trailing pass rechecks Controller authority. A read, expiry-delete, or job-processing infrastructure failure is isolated to that queue file, logged with its path, and does not block later files in the snapshot. Snapshot-enumeration failures still end that pass and rely on the existing debounce or interval for a later attempt. Callers may suppress intermediate-job notifications and provide a bounded friendly workflow title; all other jobs notify once by default. The requesting device polls the synced job for up to twenty minutes and then returns the ordinary structured result to its caller. Completed and failed jobs remain available for sync recovery for 48 hours before the Controller removes them. Queue files contain the request messages and schema inside the user's synced vault; they contain no provider credentials.
+On TPS Controller devices, structured requests execute directly through that provider chain. On user-role devices, a requested OpenAI or Gemini provider executes directly when its SecretStorage credential is configured on that device. Text-only requests without a local cloud credential retain the versioned Markdown-backed JSON fallback in `_assets/TPS AI Queue`, using a file type that ordinary Obsidian Sync always carries. The Controller claims pending jobs, reclaims processing jobs whose claim is older than ten minutes, executes and schema-validates the request locally, writes the result or compact redacted failure back to the same job, and sends a TPS Notifier message without including prompt or response content. Every scan synchronously snapshots only Markdown descendants of the queue folder through Obsidian's public recursive traversal; unrelated vault Markdown is never enumerated, and nested jobs retain traversal order. Queue-file changes received during an active scan coalesce into one serialized trailing pass; a later burst returns to the existing debounce, and every trailing pass rechecks Controller authority. A read, expiry-delete, or job-processing infrastructure failure is isolated to that queue file, logged with its path, and does not block later files in the snapshot. Snapshot-enumeration failures still end that pass and rely on the existing debounce or interval for a later attempt. Callers may suppress intermediate-job notifications and provide a bounded friendly workflow title; all other jobs notify once by default. The requesting device polls the synced job for up to twenty minutes and then returns the ordinary structured result to its caller. Completed and failed jobs remain available for sync recovery for 48 hours before the Controller removes them. Queue files contain the request messages and schema inside the user's synced vault; they contain no provider credentials. Inline images are never queued: image requests require local Gemini and either execute immediately on the requesting device or fail before any vault write.
 
 Ollama defaults to Mac loopback and therefore is not a mobile provider. Mobile uses configured cloud fallbacks unless a separately secured Ollama endpoint is supplied. Do not expose a raw Ollama port to the internet; its local API does not authenticate requests.
 
@@ -81,7 +90,7 @@ The API is available as the enabled plugin's `api` and as `app.tpsAiGateway`:
 - `proposeCapability(request)`
 - `executeCapability(proposal, context)`
 
-Every request requires a stable `taskId`, messages, and a response schema. Results include provider, model, trace ID, and attempt count for concise diagnostics.
+Every request requires a stable `taskId`, messages, and a response schema. Optional `media` entries contain a supported image MIME type plus raw base64 data; optional `preferredProviders` should select Gemini for image work. Results include provider, model, trace ID, and attempt count for concise diagnostics.
 
 ## Safety and extensibility
 
@@ -93,6 +102,7 @@ Capability handlers are registered at runtime and removed when their owner unloa
 - Provider ownership/fallback wiring tests
 - Stalled-provider timeout/fallback and credential-redaction tests
 - Caller-controlled metadata privacy regression
+- Gemini inline-image request shape, MIME/base64/size guards, device-local routing, and no-queue image regression
 - Proposal-versus-execution guard tests
 - Plaintext-key-to-SecretStorage migration and non-overwrite tests
 - Targeted recursive queue enumeration, snapshot, missing-folder/path-collision, and enumeration-failure tests
@@ -102,6 +112,7 @@ Capability handlers are registered at runtime and removed when their owner unloa
 
 ## Version notes
 
+- 0.3.0: Added guarded Gemini inline-image requests and device-local cloud execution on user-role devices while keeping text-only Controller fallback and prohibiting image queue persistence.
 - 0.2.4: Consolidated duplicate provider message classification into one internal pass while preserving exact request and response behavior across Ollama, OpenAI, and Gemini.
 - 0.2.3: Replaced every Controller whole-vault Markdown queue scan with one supported recursive queue-folder snapshot, preserving nested jobs and all released queue/provider behavior while making scan work proportional to the queue subtree.
 - 0.2.2: Isolated individual Controller queue-file failures so later jobs continue in order, with a path-scoped diagnostic and no retry, concurrency, or provider-fallback changes.

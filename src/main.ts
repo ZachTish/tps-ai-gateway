@@ -14,6 +14,10 @@ import * as logger from "./logger";
 import { parseRemoteAiJob, remoteAiJobIsClaimable, remoteAiJobIsExpired, remoteAiJobPath, REMOTE_AI_QUEUE_FOLDER, REMOTE_AI_WAIT_TIMEOUT_MS, type RemoteAiJob } from "./remote-queue";
 import type { AiGatewaySettings, AiProviderId, CapabilityContext, CapabilityProposal, DecisionOption, DecisionResult, GatewayCapability, StructuredRequest, StructuredResult, TpsAiGatewayApi } from "./types";
 
+const INLINE_MEDIA_MAX_ITEMS = 3;
+const INLINE_MEDIA_MAX_BASE64_CHARACTERS = 16 * 1024 * 1024;
+const INLINE_MEDIA_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+
 export default class TpsAiGatewayPlugin extends Plugin {
   settings: AiGatewaySettings = DEFAULT_SETTINGS;
   api!: TpsAiGatewayApi;
@@ -59,8 +63,23 @@ export default class TpsAiGatewayPlugin extends Plugin {
   private async completeStructured<T>(request: StructuredRequest): Promise<StructuredResult<T>> {
     if (!request.taskId.trim()) throw new Error("AI gateway taskId is required.");
     if (!request.messages.length) throw new Error("AI gateway messages are required.");
-    if (!this.isControllerDevice()) return this.completeStructuredRemotely<T>(request);
+    validateInlineMedia(request);
+    if (!this.isControllerDevice()) {
+      const localCloudProviders = this.deviceLocalCloudProviders(request);
+      if (localCloudProviders.length) return this.completeStructuredLocally<T>({ ...request, preferredProviders: localCloudProviders });
+      if (request.media?.length) throw new Error("Image requests require Gemini to be configured in TPS AI Gateway on this device.");
+      return this.completeStructuredRemotely<T>(request);
+    }
     return this.completeStructuredLocally<T>(request);
+  }
+
+  private deviceLocalCloudProviders(request: StructuredRequest): AiProviderId[] {
+    const requested = request.preferredProviders?.length ? request.preferredProviders : this.settings.providerOrder;
+    if (request.media?.length) {
+      return requested.includes("gemini") && this.readSecret(this.settings.geminiApiKeySecret) ? ["gemini"] : [];
+    }
+    return requested.filter((provider) => (provider === "openai" && Boolean(this.readSecret(this.settings.openAiApiKeySecret)))
+      || (provider === "gemini" && Boolean(this.readSecret(this.settings.geminiApiKeySecret))));
   }
 
   private async completeStructuredLocally<T>(request: StructuredRequest): Promise<StructuredResult<T>> {
@@ -85,7 +104,7 @@ export default class TpsAiGatewayPlugin extends Plugin {
       try {
         const response = await withProviderTimeout(
           provider,
-          callProvider(provider, this.settings, credentials, request.messages, request.schema),
+          callProvider(provider, this.settings, credentials, request.messages, request.schema, request.media),
         );
         if (!response.text) throw new Error("Provider returned no structured result.");
         const data = JSON.parse(response.text) as T;
@@ -359,6 +378,18 @@ export default class TpsAiGatewayPlugin extends Plugin {
   }
 }
 
+export function validateInlineMedia(request: StructuredRequest): void {
+  const media = request.media || [];
+  if (media.length > INLINE_MEDIA_MAX_ITEMS) throw new Error(`TPS AI Gateway accepts at most ${INLINE_MEDIA_MAX_ITEMS} inline images.`);
+  let totalCharacters = 0;
+  for (const item of media) {
+    if (!INLINE_MEDIA_MIME_TYPES.has(item.mimeType)) throw new Error(`Unsupported inline image type: ${item.mimeType || "unknown"}.`);
+    if (!item.data || !/^[A-Za-z0-9+/]+={0,2}$/.test(item.data)) throw new Error("Inline image data must be base64 without a data URL prefix.");
+    totalCharacters += item.data.length;
+  }
+  if (totalCharacters > INLINE_MEDIA_MAX_BASE64_CHARACTERS) throw new Error("Inline images are too large. Capture smaller photos and try again.");
+}
+
 class AiGatewaySettingTab extends PluginSettingTab {
   private activeRoute: AiSettingsRoute = "cloud";
 
@@ -408,7 +439,7 @@ class AiGatewaySettingTab extends PluginSettingTab {
     if (this.activeRoute === "cloud") {
       secretReferenceSetting(page, this.plugin, "OpenAI API key", "Select or create a device-local Obsidian secret. API billing is separate from ChatGPT/Codex subscriptions.", "openAiApiKeySecret");
       textSetting(page, this.plugin, "OpenAI model", "OpenAI structured-output model.", "openAiModel");
-      secretReferenceSetting(page, this.plugin, "Gemini API key", "Select or create a device-local Obsidian secret for the mobile-capable cloud fallback.", "geminiApiKeySecret");
+      secretReferenceSetting(page, this.plugin, "Gemini API key", "Select or create a device-local Obsidian secret for structured text and image requests on this device.", "geminiApiKeySecret");
       textSetting(page, this.plugin, "Gemini model", "Gemini structured-output model.", "geminiModel");
     } else if (this.activeRoute === "local") {
       new Setting(page).setName("Use local Ollama").setDesc("Try local structured inference before configured cloud providers.").addToggle((toggle) => toggle.setValue(this.plugin.settings.ollamaEnabled).onChange(async (value) => { this.plugin.settings.ollamaEnabled = value; await this.plugin.saveSettings(); }));

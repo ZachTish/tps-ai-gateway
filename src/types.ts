@@ -23,10 +23,16 @@ export interface AiMessage {
   content: string;
 }
 
+export interface AiInlineMedia {
+  mimeType: "image/jpeg" | "image/png" | "image/webp";
+  data: string;
+}
+
 export interface StructuredRequest {
   taskId: string;
   messages: AiMessage[];
   schema: Record<string, unknown>;
+  media?: AiInlineMedia[];
   preferredProviders?: AiProviderId[];
   metadata?: Record<string, string | number | boolean>;
 }
