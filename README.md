@@ -1,5 +1,13 @@
 # TPS AI Gateway
 
+## 0.4.1
+
+- Durable text requests are still persisted before inference, but an eligible requesting device now claims and executes the new job immediately instead of waiting for a background queue scan and result polling interval.
+- An existing matching pending or reclaimable job receives the same immediate path when the current device can process it. A per-file in-flight guard prevents the local fast path and queue scanner from invoking the provider twice.
+- Devices without a local eligible credential keep the existing synchronized Controller/other-device queue and recovery behavior. Request identity, leases, retention, provider routing, schemas, settings, privacy, and public APIs are unchanged.
+- This is a backward-compatible latency and reliability patch with no settings or queue migration. Minimum supported Obsidian remains 1.12.0.
+- Validation: all 29 Gateway checks passed, including immediate durable execution ordering, queue fallback, completed-result resume, in-flight coalescing, provider routing, and privacy boundaries. The mandatory separate build deployed byte-identical artifacts only to the isolated test vault; runtime-owned settings were preserved, no provider request was sent during UI verification, and production was not accessed.
+
 ## 0.4.0
 
 - `completeStructured()` now supports optional `grounding: "google-search"` for Gemini. The Gateway performs one Google-grounded evidence pass, then a separate schema-constrained extraction pass so the existing Gemini 2.5 Flash default can return validated JSON without pretending unsupported tool/schema combinations are available.

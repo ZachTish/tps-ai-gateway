@@ -29,6 +29,7 @@ export default class TpsAiGatewayPlugin extends Plugin {
   private remoteQueueScanInFlight = false;
   private remoteQueueRescanRequested = false;
   private remoteQueueScanTimer: number | null = null;
+  private remoteJobsInFlight = new Set<string>();
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -178,6 +179,11 @@ export default class TpsAiGatewayPlugin extends Plugin {
         return job.result as StructuredResult<T>;
       }
       if (job.status === "failed") throw new Error(job.error || "The durable AI request failed.");
+      if (remoteAiJobIsClaimable(job) && this.canProcessRemoteJob(job)) {
+        logger.flow("RemoteQueue", "durable-immediate", { jobId, taskId: request.taskId, route: "resume" });
+        await this.processRemoteJob(existing, job);
+        return this.waitForRemoteJob<T>(path, request.schema);
+      }
       this.scheduleRemoteQueueScan("durable-resume");
       return this.waitForRemoteJob<T>(path, request.schema);
     }
@@ -199,6 +205,11 @@ export default class TpsAiGatewayPlugin extends Plugin {
     };
     const file = await this.createRemoteJob(job);
     logger.flow("RemoteQueue", "durable-submitted", { jobId, taskId: request.taskId, path: file.path });
+    if (this.canProcessRemoteJob(job)) {
+      logger.flow("RemoteQueue", "durable-immediate", { jobId, taskId: request.taskId, route: "submitted" });
+      await this.processRemoteJob(file, job);
+      return this.waitForRemoteJob<T>(path, request.schema);
+    }
     this.scheduleRemoteQueueScan("durable-submitted");
     new Notice("Saved this AI request. Another online device can finish it if needed.", 7000);
     return this.waitForRemoteJob<T>(file.path, request.schema);
@@ -295,25 +306,32 @@ export default class TpsAiGatewayPlugin extends Plugin {
   }
 
   private async processRemoteJob(file: TFile, job: RemoteAiJob): Promise<void> {
-    const localProviders = this.remoteJobLocalProviders(job);
-    if (!this.isControllerDevice() && !localProviders.length) return;
-    const startedAt = new Date().toISOString();
-    const claimed: RemoteAiJob = { ...job, status: "processing", controllerDeviceId: this.getDeviceId(), startedAt, updatedAt: startedAt, error: undefined };
-    await this.app.vault.modify(file, JSON.stringify(claimed, null, 2));
-    logger.flow("RemoteQueue", "claimed", { jobId: job.id, taskId: job.taskId });
+    const inFlight = this.remoteJobsInFlight || (this.remoteJobsInFlight = new Set<string>());
+    if (inFlight.has(file.path)) return;
+    inFlight.add(file.path);
     try {
-      const request = { taskId: job.taskId, messages: job.messages, schema: job.schema, grounding: job.grounding, preferredProviders: job.preferredProviders, metadata: job.metadata };
-      const result = await this.completeStructuredLocally(request, this.isControllerDevice() ? undefined : localProviders);
-      const completed: RemoteAiJob = { ...claimed, status: "complete", updatedAt: new Date().toISOString(), result };
-      await this.app.vault.modify(file, JSON.stringify(completed, null, 2));
-      logger.flow("RemoteQueue", "completed", { jobId: job.id, taskId: job.taskId, provider: result.provider, model: result.model });
-      await this.notifyRemoteJob(job, true);
-    } catch (error) {
-      const message = logger.errorSummary(error, [this.readSecret(this.settings.openAiApiKeySecret), this.readSecret(this.settings.geminiApiKeySecret)]);
-      const failed: RemoteAiJob = { ...claimed, status: "failed", updatedAt: new Date().toISOString(), error: message };
-      await this.app.vault.modify(file, JSON.stringify(failed, null, 2));
-      logger.warn("RemoteQueue", "failed", { jobId: job.id, taskId: job.taskId, error: message });
-      await this.notifyRemoteJob(job, false);
+      const localProviders = this.remoteJobLocalProviders(job);
+      if (!this.isControllerDevice() && !localProviders.length) return;
+      const startedAt = new Date().toISOString();
+      const claimed: RemoteAiJob = { ...job, status: "processing", controllerDeviceId: this.getDeviceId(), startedAt, updatedAt: startedAt, error: undefined };
+      await this.app.vault.modify(file, JSON.stringify(claimed, null, 2));
+      logger.flow("RemoteQueue", "claimed", { jobId: job.id, taskId: job.taskId });
+      try {
+        const request = { taskId: job.taskId, messages: job.messages, schema: job.schema, grounding: job.grounding, preferredProviders: job.preferredProviders, metadata: job.metadata };
+        const result = await this.completeStructuredLocally(request, this.isControllerDevice() ? undefined : localProviders);
+        const completed: RemoteAiJob = { ...claimed, status: "complete", updatedAt: new Date().toISOString(), result };
+        await this.app.vault.modify(file, JSON.stringify(completed, null, 2));
+        logger.flow("RemoteQueue", "completed", { jobId: job.id, taskId: job.taskId, provider: result.provider, model: result.model });
+        await this.notifyRemoteJob(job, true);
+      } catch (error) {
+        const message = logger.errorSummary(error, [this.readSecret(this.settings.openAiApiKeySecret), this.readSecret(this.settings.geminiApiKeySecret)]);
+        const failed: RemoteAiJob = { ...claimed, status: "failed", updatedAt: new Date().toISOString(), error: message };
+        await this.app.vault.modify(file, JSON.stringify(failed, null, 2));
+        logger.warn("RemoteQueue", "failed", { jobId: job.id, taskId: job.taskId, error: message });
+        await this.notifyRemoteJob(job, false);
+      }
+    } finally {
+      inFlight.delete(file.path);
     }
   }
 

@@ -774,11 +774,26 @@ test("durable jobs resume completed results and user-role workers stay on eligib
     submittedJob = job;
     return queueFile(`${REMOTE_AI_QUEUE_FOLDER}/${job.id}.md`);
   };
+  submittingPlugin.canProcessRemoteJob = () => false;
   submittingPlugin.scheduleRemoteQueueScan = () => {};
   submittingPlugin.waitForRemoteJob = async () => completeJob.result;
   await submittingPlugin.completeStructuredDurably(request);
   assert.equal(submittedJob.durable, true, "new durable jobs must remain resumable after they sync and the app reopens");
   assert.equal(submittedJob.grounding, "google-search");
+
+  const immediateOrder = [];
+  const immediatePlugin = Object.create(GatewayPlugin.prototype);
+  immediatePlugin.app = { vault: { getAbstractFileByPath: () => null } };
+  immediatePlugin.getDeviceId = () => "requesting-device";
+  immediatePlugin.createRemoteJob = async (job) => queueFile(`${REMOTE_AI_QUEUE_FOLDER}/${job.id}.md`);
+  immediatePlugin.canProcessRemoteJob = () => true;
+  immediatePlugin.processRemoteJob = async () => { immediateOrder.push("process"); };
+  immediatePlugin.waitForRemoteJob = async () => { immediateOrder.push("read-complete"); return completeJob.result; };
+  immediatePlugin.scheduleRemoteQueueScan = () => { throw new Error("a locally executable durable job must not wait for the background scanner"); };
+  const immediate = await immediatePlugin.completeStructuredDurably(request);
+  assert.equal(immediate.provider, "gemini");
+  assert.deepEqual(immediateOrder, ["process", "read-complete"]);
+  assert.match(main, /"durable-immediate"/);
 
   const writes = [];
   let exactProviders;
