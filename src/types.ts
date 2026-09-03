@@ -1,8 +1,9 @@
-export type AiProviderId = "ollama" | "openai" | "gemini";
+export type AiProviderId = "apple" | "ollama" | "openai" | "gemini";
 
 export interface AiGatewaySettings {
   settingsVersion: number;
   providerOrder: AiProviderId[];
+  appleIntelligenceEnabled: boolean;
   ollamaEnabled: boolean;
   ollamaUrl: string;
   ollamaModel: string;
@@ -97,6 +98,7 @@ export interface CapabilityProposal<TInput = unknown> {
 export interface TpsAiGatewayApi {
   readonly features: {
     readonly googleSearchGrounding: true;
+    readonly appleIntelligence: true;
   };
   completeStructured<T>(request: StructuredRequest): Promise<StructuredResult<T>>;
   choose<T>(request: Omit<StructuredRequest, "schema"> & { options: DecisionOption<T>[] }): Promise<DecisionResult<T>>;

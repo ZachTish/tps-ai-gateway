@@ -54,7 +54,7 @@ const queueVault = (getChildren, methods = {}) => ({
   ...methods,
 });
 
-async function importGatewayPlugin() {
+async function importGatewayPlugin(isIosApp = false) {
   const bundle = await esbuildBuild({
     entryPoints: [fileURLToPath(new URL("../src/main.ts", import.meta.url))],
     bundle: true,
@@ -70,6 +70,7 @@ async function importGatewayPlugin() {
           contents: `
             export class App {}
             export class Notice {}
+            export const Platform = { isIosApp: ${JSON.stringify(isIosApp)} };
             export class Plugin {}
             export class PluginSettingTab {}
             export class SecretComponent {}
@@ -149,13 +150,13 @@ test("gateway owns provider transport and fallback", () => {
   assert.match(providers, /provider === "ollama"/);
   assert.match(providers, /provider === "openai"/);
   assert.match(providers, /generativelanguage\.googleapis\.com/);
-  assert.match(main, /for \(const provider of providers\)/);
+  assert.match(main, /for \(const provider of callableProviders\)/);
   assert.match(main, /assertSchema\(data, request\.schema\)/);
   assert.match(providers, /credentials\.openAiApiKey/);
   assert.match(providers, /credentials\.geminiApiKey/);
   assert.match(providers, /"x-goog-api-key": apiKey/);
   assert.doesNotMatch(providers, /generateContent\?key=/);
-  assert.match(main, /features: \{ googleSearchGrounding: true \}/);
+  assert.match(main, /features: \{ googleSearchGrounding: true, appleIntelligence: true \}/);
 });
 
 test("all providers preserve system and conversational message request shapes", async () => {
@@ -460,7 +461,7 @@ test("gateway diagnostics never log caller-controlled metadata values", () => {
   const summary = metadataSummary({ sourcePluginId: "tps-health", noteBody: "private health details" });
   assert.deepEqual(summary, { metadataFieldCount: 2 });
   assert.doesNotMatch(JSON.stringify(summary), /tps-health|private health details|sourcePluginId|noteBody/);
-  const requestStartLog = main.slice(main.indexOf('logger.flow("Request", "start"'), main.indexOf("for (const provider of providers)"));
+  const requestStartLog = main.slice(main.indexOf('logger.flow("Request", "start"'), main.indexOf("for (const provider of callableProviders)"));
   assert.match(requestStartLog, /\.\.\.logger\.metadataSummary\(request\.metadata\)/);
   assert.doesNotMatch(requestStartLog, /metadata: request\.metadata/);
 });
@@ -472,7 +473,7 @@ test("gateway migrates plaintext API keys into SecretStorage and purges them fro
     geminiApiKey: " legacy-gemini ",
   };
   const settings = sanitizeSettings(legacy);
-  assert.equal(settings.settingsVersion, 2);
+  assert.equal(settings.settingsVersion, 3);
   assert.equal("openAiApiKey" in settings, false);
   assert.equal("geminiApiKey" in settings, false);
 
@@ -499,7 +500,7 @@ test("gateway preserves explicit provider choices and empty text settings", () =
     openAiModel: "",
     geminiModel: "",
   });
-  assert.deepEqual(settings.providerOrder, ["openai"]);
+  assert.deepEqual(settings.providerOrder, ["apple", "openai"]);
   assert.equal(settings.ollamaUrl, "");
   assert.equal(settings.ollamaModel, "");
   assert.equal(settings.openAiModel, "");
@@ -508,7 +509,7 @@ test("gateway preserves explicit provider choices and empty text settings", () =
 
 test("gateway never downgrades future settings and merges only local changes", () => {
   const future = {
-    settingsVersion: 3,
+    settingsVersion: 4,
     providerOrder: ["gemini"],
     openAiModel: "mobile-model",
     geminiModel: "future-gemini",
@@ -520,11 +521,11 @@ test("gateway never downgrades future settings and merges only local changes", (
   const merged = mergeChangedSettings(future, local, changed);
 
   assert.deepEqual([...changed], ["openAiModel"]);
-  assert.equal(merged.settingsVersion, 3);
+  assert.equal(merged.settingsVersion, 4);
   assert.equal(merged.openAiModel, "desktop-new");
   assert.equal(merged.geminiModel, "future-gemini");
   assert.deepEqual(merged.futureProvider, { model: "future-model" });
-  assert.equal(sanitizeSettings(future).settingsVersion, 3);
+  assert.equal(sanitizeSettings(future).settingsVersion, 4);
   assert.deepEqual(planLegacyApiKeyMigration({ ...future, openAiApiKey: "do-not-migrate" }, sanitizeSettings(future), () => null), {
     writes: [],
     shouldPersist: false,
@@ -540,7 +541,7 @@ test("settings coordinator merges local edits into the latest future-version pay
   });
   let stored = {
     ...clone(baseline),
-    settingsVersion: 3,
+    settingsVersion: 4,
     geminiModel: "mobile-new",
     futureProvider: { model: "future-model" },
   };
@@ -554,7 +555,7 @@ test("settings coordinator merges local edits into the latest future-version pay
 
   await coordinator.request(live);
 
-  assert.equal(stored.settingsVersion, 3);
+  assert.equal(stored.settingsVersion, 4);
   assert.equal(stored.openAiModel, "desktop-new");
   assert.equal(stored.geminiModel, "mobile-new");
   assert.deepEqual(stored.futureProvider, { model: "future-model" });
@@ -757,6 +758,152 @@ test("gateway uses device-local cloud credentials and reserves durable text work
   await assert.rejects(() => plugin.completeStructured({ ...base, preferredProviders: ["gemini"], media: [{ mimeType: "image/jpeg", data: "aGVsbG8=" }] }), /require Gemini/);
 });
 
+test("iOS routes eligible structured requests through TishOS Apple Intelligence", async () => {
+  const { default: GatewayPlugin, tishOSAppleIntelligenceURL } = await importGatewayPlugin(true);
+  assert.equal(
+    tishOSAppleIntelligenceURL("health-job_1234"),
+    "tishos://ai-gateway?job=health-job_1234",
+  );
+  assert.throws(() => tishOSAppleIntelligenceURL("short"), /job id is invalid/);
+
+  const plugin = Object.create(GatewayPlugin.prototype);
+  plugin.settings = {
+    appleIntelligenceEnabled: true,
+    providerOrder: ["apple", "gemini"],
+  };
+  plugin.isControllerDevice = () => true;
+  let appleCalls = 0;
+  let localCalls = 0;
+  plugin.completeStructuredWithTishOSAppleIntelligence = async () => {
+    appleCalls += 1;
+    return {
+      data: { ok: true },
+      provider: "apple",
+      model: "apple-on-device",
+      traceId: "apple",
+      attempts: 1,
+    };
+  };
+  plugin.completeStructuredLocally = async () => {
+    localCalls += 1;
+    return {
+      data: { ok: true },
+      provider: "gemini",
+      model: "gemini-model",
+      traceId: "local",
+      attempts: 1,
+    };
+  };
+  const request = {
+    taskId: "ios-structured",
+    messages: [{ role: "user", content: "Return ok." }],
+    schema: { type: "object" },
+  };
+  assert.equal((await plugin.completeStructured(request)).provider, "apple");
+  assert.equal(appleCalls, 1);
+  assert.equal(localCalls, 0);
+
+  await plugin.completeStructured({
+    ...request,
+    media: [{ mimeType: "image/jpeg", data: "aGVsbG8=" }],
+  });
+  assert.equal(appleCalls, 1, "Apple handoff is text-only");
+  assert.equal(localCalls, 1);
+});
+
+test("Apple handoff writes one explicit queue target and opens only the strict TishOS route", async () => {
+  const { default: GatewayPlugin } = await importGatewayPlugin(true);
+  const plugin = Object.create(GatewayPlugin.prototype);
+  plugin.getDeviceId = () => "ios-device";
+  let submittedJob;
+  plugin.createRemoteJob = async (job) => {
+    submittedJob = job;
+    return queueFile(`${REMOTE_AI_QUEUE_FOLDER}/${job.id}.md`);
+  };
+  plugin.waitForRemoteJob = async () => ({
+    data: { ok: true },
+    provider: "apple",
+    model: "apple-on-device",
+    traceId: "apple",
+    attempts: 1,
+  });
+  const events = [];
+  plugin.app = { workspace: { trigger: (...args) => events.push(args) } };
+  plugin.manifest = { id: "tps-ai-gateway" };
+  const opened = [];
+  const previousWindow = globalThis.window;
+  globalThis.window = { open: (...args) => opened.push(args) };
+  try {
+    await plugin.completeStructuredWithTishOSAppleIntelligence({
+      taskId: "health-describe-food",
+      messages: [{ role: "user", content: "oatmeal" }],
+      schema: { type: "object" },
+      metadata: { workflow: "describe-food" },
+    });
+  } finally {
+    globalThis.window = previousWindow;
+  }
+
+  assert.equal(submittedJob.executionTarget, "tishos-apple");
+  assert.deepEqual(submittedJob.preferredProviders, ["apple"]);
+  assert.match(opened[0][0], /^tishos:\/\/ai-gateway\?job=[a-z0-9_-]{8,160}$/i);
+  assert.equal(opened[0][1], "_self");
+  assert.equal(events.length, 1);
+});
+
+test("durable iOS work preserves its id and routes exclusively through TishOS Apple Intelligence", async () => {
+  const { default: GatewayPlugin } = await importGatewayPlugin(true);
+  const plugin = Object.create(GatewayPlugin.prototype);
+  plugin.settings = {
+    appleIntelligenceEnabled: true,
+    providerOrder: ["apple", "gemini"],
+  };
+  plugin.getDeviceId = () => "ios-device";
+  plugin.app = {
+    vault: { getAbstractFileByPath: () => null },
+  };
+  let submittedJob;
+  plugin.createRemoteJob = async (job) => {
+    submittedJob = job;
+    return queueFile(`${REMOTE_AI_QUEUE_FOLDER}/${job.id}.md`);
+  };
+  plugin.waitForRemoteJob = async () => ({
+    data: { calories: 320 },
+    provider: "apple",
+    model: "apple-private-cloud",
+    traceId: "apple-durable",
+    attempts: 1,
+  });
+  const opened = [];
+  const previousWindow = globalThis.window;
+  globalThis.window = { open: (...args) => opened.push(args) };
+  try {
+    const result = await plugin.completeStructuredDurably({
+      taskId: "health-describe-food",
+      durableJobId: "health-describe-food-20260903",
+      messages: [{ role: "user", content: "oatmeal and berries" }],
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        required: ["calories"],
+        properties: { calories: { type: "number" } },
+      },
+    });
+    assert.equal(result.provider, "apple");
+  } finally {
+    globalThis.window = previousWindow;
+  }
+
+  assert.equal(submittedJob.id, "health-describe-food-20260903");
+  assert.equal(submittedJob.durable, true);
+  assert.equal(submittedJob.executionTarget, "tishos-apple");
+  assert.deepEqual(submittedJob.preferredProviders, ["apple"]);
+  assert.deepEqual(opened, [[
+    "tishos://ai-gateway?job=health-describe-food-20260903",
+    "_self",
+  ]]);
+});
+
 test("any device with a matching local cloud credential can finish durable queue work", async () => {
   const { default: GatewayPlugin } = await importGatewayPlugin();
   const plugin = Object.create(GatewayPlugin.prototype);
@@ -779,6 +926,11 @@ test("any device with a matching local cloud credential can finish durable queue
   };
   assert.equal(plugin.canProcessRemoteQueue(), true);
   assert.equal(plugin.canProcessRemoteJob(job), true);
+  assert.equal(
+    plugin.canProcessRemoteJob({ ...job, executionTarget: "tishos-apple" }),
+    false,
+    "Obsidian workers must leave explicit Apple jobs for TishOS",
+  );
   assert.deepEqual(plugin.remoteJobLocalProviders(job), ["gemini"]);
   assert.equal(plugin.canProcessRemoteJob({ ...job, requesterDeviceId: "other-device" }), false, "a non-requester waits so the submitting device can claim first");
   assert.equal(plugin.canProcessRemoteJob({ ...job, requesterDeviceId: "other-device", createdAt: new Date(Date.now() - 60_000).toISOString() }), true, "an online Gemini device eventually recovers abandoned durable work");
@@ -1334,7 +1486,7 @@ test("remote queue skips a requested trailing pass after all processing authorit
 test("gateway settings use a shallow three-destination routed hub", () => {
   assert.match(main, /Choose what to configure/);
   assert.match(main, /title: "Cloud providers"/);
-  assert.match(main, /title: "Local Ollama"/);
+  assert.match(main, /title: "Device AI"/);
   assert.match(main, /title: "Diagnostics"/);
   assert.match(main, /"aria-pressed": String\(isActive\)/);
   assert.match(main, /pageHeading\.focus\(\{ preventScroll: true \}\)/);

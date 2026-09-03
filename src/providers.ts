@@ -11,6 +11,7 @@ export async function callProvider(
   media: AiInlineMedia[] = [],
   grounding?: AiGroundingMode,
 ): Promise<{ text: string; model: string; sources?: AiGroundingSource[] }> {
+  if (provider === "apple") throw new Error("Apple Intelligence requests must be handed to the TishOS iOS app.");
   if (media.length && provider !== "gemini") throw new Error(`${provider} does not support TPS inline image requests.`);
   if (grounding && provider !== "gemini") throw new Error(`${provider} does not support Google Search grounding.`);
   if (provider === "ollama") {

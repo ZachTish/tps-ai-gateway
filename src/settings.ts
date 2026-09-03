@@ -4,8 +4,9 @@ export const OPENAI_API_KEY_SECRET = "tps-ai-gateway-openai-api-key";
 export const GEMINI_API_KEY_SECRET = "tps-ai-gateway-gemini-api-key";
 
 export const DEFAULT_SETTINGS: AiGatewaySettings = {
-  settingsVersion: 2,
-  providerOrder: ["ollama", "openai", "gemini"],
+  settingsVersion: 3,
+  providerOrder: ["apple", "ollama", "openai", "gemini"],
+  appleIntelligenceEnabled: true,
   ollamaEnabled: true,
   ollamaUrl: "http://127.0.0.1:11434",
   ollamaModel: "gemma3:12b",
@@ -45,7 +46,7 @@ interface SettingsSaveWaiter {
   reject: (error: unknown) => void;
 }
 
-const providerIds: AiProviderId[] = ["ollama", "openai", "gemini"];
+const providerIds: AiProviderId[] = ["apple", "ollama", "openai", "gemini"];
 const record = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const string = (value: unknown, fallback: string): string => typeof value === "string" ? value.trim() : fallback;
 const valuesMatch = (left: unknown, right: unknown): boolean => JSON.stringify(left) === JSON.stringify(right);
@@ -56,13 +57,19 @@ export const asSettingsRecord = (value: unknown): Record<string, unknown> => ({ 
 export function sanitizeSettings(value: unknown): AiGatewaySettings {
   const raw = record(value);
   const storedVersion = Number(raw.settingsVersion);
-  const settingsVersion = Number.isFinite(storedVersion) && storedVersion > 2 ? storedVersion : 2;
-  const order = Array.isArray(raw.providerOrder)
+  const settingsVersion = Number.isFinite(storedVersion) && storedVersion > 3 ? storedVersion : 3;
+  const storedOrder = Array.isArray(raw.providerOrder)
     ? raw.providerOrder.filter((item): item is AiProviderId => providerIds.includes(item as AiProviderId))
     : DEFAULT_SETTINGS.providerOrder;
+  const order = Number.isFinite(storedVersion) && storedVersion >= 3
+    ? storedOrder
+    : ["apple" as const, ...storedOrder.filter((provider) => provider !== "apple")];
   return {
     settingsVersion,
     providerOrder: [...new Set(order)],
+    appleIntelligenceEnabled: typeof raw.appleIntelligenceEnabled === "boolean"
+      ? raw.appleIntelligenceEnabled
+      : DEFAULT_SETTINGS.appleIntelligenceEnabled,
     ollamaEnabled: typeof raw.ollamaEnabled === "boolean" ? raw.ollamaEnabled : DEFAULT_SETTINGS.ollamaEnabled,
     ollamaUrl: string(raw.ollamaUrl, DEFAULT_SETTINGS.ollamaUrl).replace(/\/+$/, ""),
     ollamaModel: string(raw.ollamaModel, DEFAULT_SETTINGS.ollamaModel),
@@ -93,7 +100,7 @@ export function mergeChangedSettings(
   const merged: Record<string, unknown> = { ...latest };
   for (const key of changedKeys) merged[key] = JSON.parse(JSON.stringify(snapshot[key]));
   const latestVersion = Number(latest.settingsVersion);
-  merged.settingsVersion = Number.isFinite(latestVersion) && latestVersion > 2 ? latestVersion : 2;
+  merged.settingsVersion = Number.isFinite(latestVersion) && latestVersion > 3 ? latestVersion : 3;
   return merged;
 }
 
@@ -239,7 +246,7 @@ export function planLegacyApiKeyMigration(
 ): SettingsMigrationPlan {
   const raw = record(value);
   const storedVersion = Number(raw.settingsVersion);
-  if (Number.isFinite(storedVersion) && storedVersion > 2) {
+  if (Number.isFinite(storedVersion) && storedVersion > 3) {
     return { writes: [], shouldPersist: false };
   }
   const candidates: Array<LegacyApiKeyMigration> = [
@@ -249,10 +256,13 @@ export function planLegacyApiKeyMigration(
   const writes = candidates.filter(({ secretName, value: legacyValue }) => (
     Boolean(legacyValue) && !String(readSecret(secretName) || "").trim()
   ));
-  const shouldPersist = storedVersion !== 2
+  const shouldPersist = storedVersion !== 3
     || Object.prototype.hasOwnProperty.call(raw, "openAiApiKey")
     || Object.prototype.hasOwnProperty.call(raw, "geminiApiKey")
     || typeof raw.openAiApiKeySecret !== "string"
-    || typeof raw.geminiApiKeySecret !== "string";
+    || typeof raw.geminiApiKeySecret !== "string"
+    || typeof raw.appleIntelligenceEnabled !== "boolean"
+    || !Array.isArray(raw.providerOrder)
+    || !raw.providerOrder.includes("apple");
   return { writes, shouldPersist };
 }

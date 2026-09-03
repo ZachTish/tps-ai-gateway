@@ -103,7 +103,9 @@ TPS AI Gateway requires Obsidian 1.12.0 or newer because its cloud-credential co
 
 ## Providers
 
-Default order: local Ollama (`gemma3:12b`), OpenAI, then Google AI. New installations use hosted Gemma (`gemma-4-26b-a4b-it`) for Google AI; an existing Gemini or Gemma model choice is preserved. Missing, failed, or stalled providers fall through; each provider attempt has a 60-second ceiling so one transport cannot leave the whole request pending forever. Provider configuration lives only in this plugin. OpenAI and Google AI keys are selected through Obsidian SecretStorage and are never written to plugin `data.json`; the persisted `gemini` provider/key identifiers remain stable for API and settings compatibility. Upgrading from settings version 1 migrates any existing plaintext keys into the default device-local secret entries before purging the legacy fields. Google authentication uses the request header rather than a query string, and provider errors are redacted before they reach diagnostics or user notices. API keys, prompts, full responses, vault bodies, and caller-supplied metadata values or field names are not logged. Request-start diagnostics retain only the number of metadata fields alongside task, provider, message-count, and trace information.
+Default order: Apple Intelligence, local Ollama (`gemma3:12b`), OpenAI, then Google AI. Apple is considered only inside the Obsidian iOS app and only for text-only, non-grounded structured work. The plugin writes its existing bounded queue job with the explicit `tishos-apple` target, opens the strict TishOS job-ID route, and waits for TishOS to return a schema-validated result in that same file. Obsidian workers never claim Apple-targeted jobs, and no Apple prompt or result enters the URL. A supported iOS 26+ device can use Apple's on-device model without an API key. Apple Private Cloud Compute requires iOS 27 plus Apple's managed entitlement in the TishOS app and is not implied by enabling this provider.
+
+New installations use hosted Gemma (`gemma-4-26b-a4b-it`) for Google AI; an existing Gemini or Gemma model choice is preserved. Missing, failed, or stalled direct providers fall through; each provider attempt has a 60-second ceiling so one transport cannot leave the whole request pending forever. Provider configuration lives only in this plugin. OpenAI and Google AI keys are selected through Obsidian SecretStorage and are never written to plugin `data.json`; the persisted `gemini` provider/key identifiers remain stable for API and settings compatibility. Upgrading from settings version 1 migrates any existing plaintext keys into the default device-local secret entries before purging the legacy fields. Google authentication uses the request header rather than a query string, and provider errors are redacted before they reach diagnostics or user notices. API keys, prompts, full responses, vault bodies, and caller-supplied metadata values or field names are not logged. Request-start diagnostics retain only the number of metadata fields alongside task, provider, message-count, and trace information.
 
 Gemini models retain Google's native JSON-schema output. Hosted Gemma instead receives the schema as an explicit prompt, places inline images before the related text, and passes through the same client-side schema validator; malformed output gets one bounded corrective call. Google Search grounding requires a Gemini model and is rejected before transport when a Gemma model is selected.
 
@@ -124,7 +126,7 @@ The API is available as the enabled plugin's `api` and as `app.tpsAiGateway`:
 - `proposeCapability(request)`
 - `executeCapability(proposal, context)`
 
-Every request requires a stable `taskId`, messages, and a response schema. Optional `media` entries contain a supported image MIME type plus raw base64 data; optional `preferredProviders` should select Gemini for image work. Optional `grounding: "google-search"` runs a bounded Gemini evidence pass followed by schema extraction and cannot be combined with media. Results include provider, model, trace ID, attempt count, and—when grounded—the returned source title/URL pairs. Callers can feature-detect this contract through `api.features.googleSearchGrounding`.
+Every request requires a stable `taskId`, messages, and a response schema. Optional `media` entries contain a supported image MIME type plus raw base64 data; optional `preferredProviders` should select Gemini for image work. Optional `grounding: "google-search"` runs a bounded Gemini evidence pass followed by schema extraction and cannot be combined with media. Results include provider, model, trace ID, attempt count, and—when grounded—the returned source title/URL pairs. Callers can feature-detect grounding through `api.features.googleSearchGrounding` and the iOS handoff through `api.features.appleIntelligence`; the latter advertises routing support, while TishOS reports actual device/model readiness.
 
 ## Safety and extensibility
 
@@ -139,6 +141,7 @@ Capability handlers are registered at runtime and removed when their owner unloa
 - Gemini inline-image request shape, MIME/base64/size guards, device-local routing, and no-queue image regression
 - Hosted-Gemma prompt-constrained schema, image-first content, fenced/embedded JSON normalization, bounded repair, and grounding rejection regressions
 - Gemini Google-grounding request shape, separate schema extraction, source filtering, device-local routing, and durable resume regression
+- iOS Apple Intelligence route, explicit queue target/provider, durable ID, and worker-exclusion regressions
 - Proposal-versus-execution guard tests
 - Plaintext-key-to-SecretStorage migration and non-overwrite tests
 - Targeted recursive queue enumeration, snapshot, missing-folder/path-collision, and enumeration-failure tests
@@ -148,6 +151,7 @@ Capability handlers are registered at runtime and removed when their owner unloa
 
 ## Version notes
 
+- 0.6.0: Added the iOS Apple Intelligence provider handoff through one explicit bounded TishOS queue target, including durable job-ID preservation, on-device Foundation Models support, Private Cloud Compute availability probing, strict text-only/no-grounding routing, and Obsidian-worker exclusion.
 - 0.5.0: Added a hosted-Gemma request path with prompt-constrained structured output, local validation, image-first input, one repair attempt, free-only Gemma 4 as the new-install default, and clearer Google AI settings labels.
 - 0.4.0: Added Gemini Google Search grounding with separate schema extraction, real grounding sources, durable queue compatibility, and an explicit public feature flag.
 - 0.3.1: Added caller-owned durable structured-text jobs that survive an app close and may be completed by any synced device with an eligible local cloud credential, while keeping inline images device-local.

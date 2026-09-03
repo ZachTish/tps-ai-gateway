@@ -1,4 +1,4 @@
-import { App, Notice, Plugin, PluginSettingTab, SecretComponent, Setting, TFile, Vault } from "obsidian";
+import { App, Notice, Platform, Plugin, PluginSettingTab, SecretComponent, Setting, TFile, Vault } from "obsidian";
 import { callProvider } from "./providers";
 import { withProviderTimeout } from "./provider-timeout";
 import { assertSchema } from "./schema";
@@ -34,7 +34,7 @@ export default class TpsAiGatewayPlugin extends Plugin {
   async onload(): Promise<void> {
     await this.loadSettings();
     this.api = {
-      features: { googleSearchGrounding: true },
+      features: { googleSearchGrounding: true, appleIntelligence: true },
       completeStructured: <T>(request: StructuredRequest) => this.completeStructured<T>(request),
       choose: <T>(request: Omit<StructuredRequest, "schema"> & { options: DecisionOption<T>[] }) => this.choose<T>(request),
       registerCapability: <TInput, TOutput>(capability: GatewayCapability<TInput, TOutput>) => this.registerCapability(capability as GatewayCapability),
@@ -76,6 +76,16 @@ export default class TpsAiGatewayPlugin extends Plugin {
       if (!DURABLE_JOB_ID_PATTERN.test(request.durableJobId)) throw new Error("AI gateway durableJobId is invalid.");
       return this.completeStructuredDurably<T>(request);
     }
+    if (this.shouldUseTishOSAppleIntelligence(request)) {
+      try {
+        return await this.completeStructuredWithTishOSAppleIntelligence<T>(request);
+      } catch (error) {
+        logger.warn("Request", "apple-intelligence-failed", {
+          taskId: request.taskId,
+          reason: logger.errorSummary(error),
+        });
+      }
+    }
     if (!this.isControllerDevice()) {
       const localCloudProviders = this.deviceLocalCloudProviders(request);
       if (localCloudProviders.length) return this.completeStructuredLocally<T>({ ...request, preferredProviders: localCloudProviders });
@@ -97,6 +107,51 @@ export default class TpsAiGatewayPlugin extends Plugin {
       || (provider === "gemini" && Boolean(this.readSecret(this.settings.geminiApiKeySecret))));
   }
 
+  private shouldUseTishOSAppleIntelligence(request: StructuredRequest): boolean {
+    if (!Platform.isIosApp || !this.settings.appleIntelligenceEnabled) return false;
+    if (request.media?.length || request.grounding) return false;
+    const requested = request.preferredProviders?.length
+      ? request.preferredProviders
+      : this.settings.providerOrder;
+    return requested.includes("apple");
+  }
+
+  private async completeStructuredWithTishOSAppleIntelligence<T>(request: StructuredRequest): Promise<StructuredResult<T>> {
+    const jobId = makeTraceId(request.taskId);
+    const now = new Date().toISOString();
+    const job: RemoteAiJob = {
+      version: 1,
+      id: jobId,
+      taskId: request.taskId,
+      requesterDeviceId: this.getDeviceId(),
+      createdAt: now,
+      updatedAt: now,
+      status: "pending",
+      durable: false,
+      executionTarget: "tishos-apple",
+      messages: request.messages,
+      schema: request.schema,
+      preferredProviders: ["apple"],
+      metadata: request.metadata,
+    };
+    const file = await this.createRemoteJob(job);
+    const target = tishOSAppleIntelligenceURL(jobId);
+    logger.flow("AppleIntelligence", "handoff", {
+      jobId,
+      taskId: request.taskId,
+      path: file.path,
+    });
+    window.open(target, "_self");
+    const result = await this.waitForRemoteJob<T>(file.path, request.schema);
+    this.app.workspace.trigger("tps:ai-remote-job-completed" as any, {
+      sourcePluginId: this.manifest.id,
+      timestamp: Date.now(),
+      jobId,
+      taskId: request.taskId,
+    });
+    return result;
+  }
+
   private async completeStructuredLocally<T>(request: StructuredRequest, exactProviders?: AiProviderId[]): Promise<StructuredResult<T>> {
     const traceId = makeTraceId(request.taskId);
     const requested = request.grounding
@@ -105,6 +160,7 @@ export default class TpsAiGatewayPlugin extends Plugin {
     const providers = exactProviders?.length
       ? [...new Set(exactProviders)]
       : request.grounding ? ["gemini" as const] : [...new Set([...requested, ...this.settings.providerOrder])];
+    const callableProviders = providers.filter((provider) => provider !== "apple");
     const failures: string[] = [];
     let attempts = 0;
     const credentials = {
@@ -114,12 +170,12 @@ export default class TpsAiGatewayPlugin extends Plugin {
     logger.flow("Request", "start", {
       traceId,
       taskId: request.taskId,
-      providers,
+      providers: callableProviders,
       messageCount: request.messages.length,
       grounded: Boolean(request.grounding),
       ...logger.metadataSummary(request.metadata),
     });
-    for (const provider of providers) {
+    for (const provider of callableProviders) {
       attempts += 1;
       try {
         const response = await withProviderTimeout(
@@ -169,6 +225,7 @@ export default class TpsAiGatewayPlugin extends Plugin {
   private async completeStructuredDurably<T>(request: StructuredRequest): Promise<StructuredResult<T>> {
     const jobId = request.durableJobId!;
     const path = remoteAiJobPath(jobId);
+    const usesTishOSAppleIntelligence = this.shouldUseTishOSAppleIntelligence(request);
     const existing = this.app.vault.getAbstractFileByPath(path);
     if (existing instanceof TFile) {
       const job = parseRemoteAiJob(await this.app.vault.read(existing));
@@ -179,6 +236,13 @@ export default class TpsAiGatewayPlugin extends Plugin {
         return job.result as StructuredResult<T>;
       }
       if (job.status === "failed") throw new Error(job.error || "The durable AI request failed.");
+      if (job.executionTarget === "tishos-apple"
+        && Platform.isIosApp
+        && this.settings.appleIntelligenceEnabled
+        && remoteAiJobIsClaimable(job)) {
+        window.open(tishOSAppleIntelligenceURL(job.id), "_self");
+        return this.waitForRemoteJob<T>(path, request.schema);
+      }
       if (remoteAiJobIsClaimable(job) && this.canProcessRemoteJob(job)) {
         logger.flow("RemoteQueue", "durable-immediate", { jobId, taskId: request.taskId, route: "resume" });
         await this.processRemoteJob(existing, job);
@@ -197,14 +261,19 @@ export default class TpsAiGatewayPlugin extends Plugin {
       updatedAt: now,
       status: "pending",
       durable: true,
+      executionTarget: usesTishOSAppleIntelligence ? "tishos-apple" : undefined,
       messages: request.messages,
       schema: request.schema,
       grounding: request.grounding,
-      preferredProviders: request.preferredProviders,
+      preferredProviders: usesTishOSAppleIntelligence ? ["apple"] : request.preferredProviders,
       metadata: request.metadata,
     };
     const file = await this.createRemoteJob(job);
     logger.flow("RemoteQueue", "durable-submitted", { jobId, taskId: request.taskId, path: file.path });
+    if (usesTishOSAppleIntelligence) {
+      window.open(tishOSAppleIntelligenceURL(jobId), "_self");
+      return this.waitForRemoteJob<T>(path, request.schema);
+    }
     if (this.canProcessRemoteJob(job)) {
       logger.flow("RemoteQueue", "durable-immediate", { jobId, taskId: request.taskId, route: "submitted" });
       await this.processRemoteJob(file, job);
@@ -381,6 +450,7 @@ export default class TpsAiGatewayPlugin extends Plugin {
   }
 
   private canProcessRemoteJob(job: RemoteAiJob): boolean {
+    if (job.executionTarget === "tishos-apple") return false;
     if (!this.isControllerDevice() && !this.remoteJobLocalProviders(job).length) return false;
     if (!job.durable || job.requesterDeviceId === this.getDeviceId()) return true;
     const createdAt = Date.parse(job.createdAt);
@@ -500,13 +570,18 @@ export function validateInlineMedia(request: StructuredRequest): void {
 }
 
 function remoteJobMatchesRequest(job: RemoteAiJob, request: StructuredRequest): boolean {
+  const providerSelectionMatches = job.executionTarget === "tishos-apple"
+    ? job.preferredProviders?.length === 1
+      && job.preferredProviders[0] === "apple"
+      && (!request.preferredProviders?.length || request.preferredProviders.includes("apple"))
+    : JSON.stringify(job.preferredProviders || []) === JSON.stringify(request.preferredProviders || []);
   return job.durable === true
     && job.id === request.durableJobId
     && job.taskId === request.taskId
     && JSON.stringify(job.messages) === JSON.stringify(request.messages)
     && JSON.stringify(job.schema) === JSON.stringify(request.schema)
     && job.grounding === request.grounding
-    && JSON.stringify(job.preferredProviders || []) === JSON.stringify(request.preferredProviders || [])
+    && providerSelectionMatches
     && JSON.stringify(job.metadata || {}) === JSON.stringify(request.metadata || {});
 }
 
@@ -562,6 +637,15 @@ class AiGatewaySettingTab extends PluginSettingTab {
       secretReferenceSetting(page, this.plugin, "Google AI API key", "Select or create a device-local Obsidian secret for hosted Gemini or Gemma text and image requests on this device.", "geminiApiKeySecret");
       textSetting(page, this.plugin, "Google AI model", "Hosted Gemini or Gemma model ID. New setups default to the free-only Gemma 4 26B A4B model.", "geminiModel");
     } else if (this.activeRoute === "local") {
+      new Setting(page)
+        .setName("Use TishOS Apple Intelligence")
+        .setDesc("On iPhone or iPad, hand text-only structured requests to TishOS. TishOS prefers Apple's Private Cloud Compute model when the signed app and device are eligible, then falls back to Apple's on-device model.")
+        .addToggle((toggle) => toggle
+          .setValue(this.plugin.settings.appleIntelligenceEnabled)
+          .onChange(async (value) => {
+            this.plugin.settings.appleIntelligenceEnabled = value;
+            await this.plugin.saveSettings();
+          }));
       new Setting(page).setName("Use local Ollama").setDesc("Try local structured inference before configured cloud providers.").addToggle((toggle) => toggle.setValue(this.plugin.settings.ollamaEnabled).onChange(async (value) => { this.plugin.settings.ollamaEnabled = value; await this.plugin.saveSettings(); }));
       textSetting(page, this.plugin, "Ollama URL", "Local or secured Ollama endpoint.", "ollamaUrl");
       textSetting(page, this.plugin, "Ollama model", "Local structured-output model.", "ollamaModel");
@@ -583,7 +667,7 @@ class AiGatewaySettingTab extends PluginSettingTab {
 type AiSettingsRoute = "cloud" | "local" | "diagnostics";
 const AI_SETTINGS_ROUTES: ReadonlyArray<{ id: AiSettingsRoute; title: string; description: string }> = [
   { id: "cloud", title: "Cloud providers", description: "Choose device-local credentials and models for OpenAI and Google AI." },
-  { id: "local", title: "Local Ollama", description: "Configure optional local-first inference before cloud fallbacks." },
+  { id: "local", title: "Device AI", description: "Configure Apple Intelligence and optional local Ollama inference." },
   { id: "diagnostics", title: "Diagnostics", description: "Control privacy-safe provider and capability routing logs." },
 ];
 
@@ -598,6 +682,10 @@ function secretReferenceSetting(container: HTMLElement, plugin: TpsAiGatewayPlug
     }));
 }
 function makeTraceId(taskId: string): string { return `${taskId.replace(/[^a-z0-9_-]+/gi, "-").slice(0, 40)}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`; }
+export function tishOSAppleIntelligenceURL(jobId: string): string {
+  if (!DURABLE_JOB_ID_PATTERN.test(jobId)) throw new Error("AI gateway job id is invalid.");
+  return `tishos://ai-gateway?job=${encodeURIComponent(jobId)}`;
+}
 function stableDeviceDelay(deviceId: string, rangeMs: number): number {
   let hash = 2166136261;
   for (const character of deviceId) hash = Math.imul(hash ^ character.charCodeAt(0), 16777619);

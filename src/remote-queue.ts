@@ -13,6 +13,7 @@ export interface RemoteAiJob {
   createdAt: string;
   updatedAt: string;
   status: "pending" | "processing" | "complete" | "failed";
+  executionTarget?: "tishos-apple";
   durable?: boolean;
   messages: AiMessage[];
   schema: Record<string, unknown>;
