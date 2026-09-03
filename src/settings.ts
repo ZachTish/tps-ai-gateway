@@ -12,7 +12,7 @@ export const DEFAULT_SETTINGS: AiGatewaySettings = {
   openAiApiKeySecret: OPENAI_API_KEY_SECRET,
   openAiModel: "gpt-5-mini",
   geminiApiKeySecret: GEMINI_API_KEY_SECRET,
-  geminiModel: "gemini-2.5-flash",
+  geminiModel: "gemma-4-26b-a4b-it",
   enableLogging: false,
 };
 

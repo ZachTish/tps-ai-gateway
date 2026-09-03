@@ -559,8 +559,8 @@ class AiGatewaySettingTab extends PluginSettingTab {
     if (this.activeRoute === "cloud") {
       secretReferenceSetting(page, this.plugin, "OpenAI API key", "Select or create a device-local Obsidian secret. API billing is separate from ChatGPT/Codex subscriptions.", "openAiApiKeySecret");
       textSetting(page, this.plugin, "OpenAI model", "OpenAI structured-output model.", "openAiModel");
-      secretReferenceSetting(page, this.plugin, "Gemini API key", "Select or create a device-local Obsidian secret for structured text and image requests on this device.", "geminiApiKeySecret");
-      textSetting(page, this.plugin, "Gemini model", "Gemini structured-output model.", "geminiModel");
+      secretReferenceSetting(page, this.plugin, "Google AI API key", "Select or create a device-local Obsidian secret for hosted Gemini or Gemma text and image requests on this device.", "geminiApiKeySecret");
+      textSetting(page, this.plugin, "Google AI model", "Hosted Gemini or Gemma model ID. New setups default to the free-only Gemma 4 26B A4B model.", "geminiModel");
     } else if (this.activeRoute === "local") {
       new Setting(page).setName("Use local Ollama").setDesc("Try local structured inference before configured cloud providers.").addToggle((toggle) => toggle.setValue(this.plugin.settings.ollamaEnabled).onChange(async (value) => { this.plugin.settings.ollamaEnabled = value; await this.plugin.saveSettings(); }));
       textSetting(page, this.plugin, "Ollama URL", "Local or secured Ollama endpoint.", "ollamaUrl");
@@ -582,7 +582,7 @@ class AiGatewaySettingTab extends PluginSettingTab {
 
 type AiSettingsRoute = "cloud" | "local" | "diagnostics";
 const AI_SETTINGS_ROUTES: ReadonlyArray<{ id: AiSettingsRoute; title: string; description: string }> = [
-  { id: "cloud", title: "Cloud providers", description: "Choose device-local credentials and models for OpenAI and Gemini." },
+  { id: "cloud", title: "Cloud providers", description: "Choose device-local credentials and models for OpenAI and Google AI." },
   { id: "local", title: "Local Ollama", description: "Configure optional local-first inference before cloud fallbacks." },
   { id: "diagnostics", title: "Diagnostics", description: "Control privacy-safe provider and capability routing logs." },
 ];

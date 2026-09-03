@@ -1,4 +1,5 @@
 import { requestUrl } from "obsidian";
+import { assertSchema } from "./schema";
 import type { AiGatewaySettings, AiGroundingMode, AiGroundingSource, AiInlineMedia, AiMessage, AiProviderCredentials, AiProviderId } from "./types";
 
 export async function callProvider(
@@ -25,8 +26,11 @@ export async function callProvider(
     const text = response.json?.output_text || response.json?.output?.flatMap((entry: any) => entry.content || []).find((entry: any) => entry.type === "output_text")?.text || "";
     return { text: String(text).trim(), model: settings.openAiModel };
   }
-  if (!credentials.geminiApiKey) throw new Error("Gemini is not configured.");
+  if (!credentials.geminiApiKey) throw new Error("Google AI is not configured.");
   if (grounding === "google-search") {
+    if (isHostedGemmaModel(settings.geminiModel)) {
+      throw new Error("Google Search grounding is unavailable for hosted Gemma. Choose a Gemini model for grounded requests.");
+    }
     const grounded = await callGeminiGrounded(settings, credentials.geminiApiKey, messages);
     const evidenceSources = grounded.sources.length
       ? grounded.sources.map((source, index) => `[${index + 1}] ${source.title}: ${source.url}`).join("\n")
@@ -55,6 +59,9 @@ async function callGeminiStructured(
   schema: Record<string, unknown>,
   media: AiInlineMedia[],
 ): Promise<{ text: string; model: string }> {
+  if (isHostedGemmaModel(settings.geminiModel)) {
+    return callHostedGemmaStructured(settings, apiKey, messages, schema, media);
+  }
   const { instructions: system, rest } = splitSystemMessages(messages);
   const contents: Array<{ role: "model" | "user"; parts: Array<Record<string, unknown>> }> = rest.map((message) => ({ role: message.role === "assistant" ? "model" : "user", parts: [{ text: message.content }] }));
   if (media.length) {
@@ -74,6 +81,119 @@ async function callGeminiStructured(
   const response = await requestUrl({ url: `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(settings.geminiModel)}:generateContent`, method: "POST", headers: { "x-goog-api-key": apiKey, "Content-Type": "application/json" }, body: JSON.stringify({ system_instruction: { parts: [{ text: system }] }, contents, generationConfig: { responseMimeType: "application/json", responseJsonSchema: schema } }) });
   const text = response.json?.candidates?.[0]?.content?.parts?.map((part: any) => part?.text || "").join("") || "";
   return { text: String(text).trim(), model: settings.geminiModel };
+}
+
+async function callHostedGemmaStructured(
+  settings: AiGatewaySettings,
+  apiKey: string,
+  messages: AiMessage[],
+  schema: Record<string, unknown>,
+  media: AiInlineMedia[],
+): Promise<{ text: string; model: string }> {
+  const { instructions: system, rest } = splitSystemMessages(messages);
+  const schemaInstruction = [
+    system,
+    "Return only one valid JSON value with no Markdown fence, commentary, or reasoning.",
+    "The JSON must match this schema exactly:",
+    JSON.stringify(schema),
+  ].filter(Boolean).join("\n\n");
+  const contents: Array<{ role: "model" | "user"; parts: Array<Record<string, unknown>> }> = rest.map((message) => ({
+    role: message.role === "assistant" ? "model" : "user",
+    parts: [{ text: message.content }],
+  }));
+  if (!contents.length || contents[0].role !== "user") {
+    contents.unshift({ role: "user", parts: [{ text: schemaInstruction }] });
+  } else {
+    contents[0].parts.unshift({ text: schemaInstruction });
+  }
+  if (media.length) {
+    let targetIndex = contents.findIndex((content) => content.role === "user");
+    if (targetIndex < 0) {
+      contents.unshift({ role: "user", parts: [] });
+      targetIndex = 0;
+    }
+    // Gemma recommends placing image content before the accompanying text.
+    contents[targetIndex].parts.unshift(...media.map((item) => ({ inline_data: { mime_type: item.mimeType, data: item.data } })));
+  }
+
+  const request = async (requestContents: typeof contents): Promise<string> => {
+    const response = await requestUrl({
+      url: `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(settings.geminiModel)}:generateContent`,
+      method: "POST",
+      headers: { "x-goog-api-key": apiKey, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: requestContents,
+        generationConfig: { thinkingConfig: { thinkingLevel: "minimal" } },
+      }),
+    });
+    return String(response.json?.candidates?.[0]?.content?.parts?.map((part: any) => part?.text || "").join("") || "").trim();
+  };
+
+  const first = await request(contents);
+  const normalized = normalizeStructuredJson(first, schema);
+  if (normalized) return { text: normalized, model: settings.geminiModel };
+
+  const repaired = await request([
+    ...contents,
+    { role: "model", parts: [{ text: first.slice(0, 16000) }] },
+    { role: "user", parts: [{ text: "Your previous answer was not valid JSON matching the required schema. Return only the corrected JSON value now." }] },
+  ]);
+  const repairedNormalized = normalizeStructuredJson(repaired, schema);
+  if (!repairedNormalized) throw new Error("Hosted Gemma returned an invalid structured result after one repair attempt.");
+  return { text: repairedNormalized, model: settings.geminiModel };
+}
+
+function isHostedGemmaModel(model: string): boolean {
+  return /^models\/gemma-|^gemma-/i.test(String(model || "").trim());
+}
+
+function normalizeStructuredJson(value: string, schema: Record<string, unknown>): string | null {
+  const trimmed = String(value || "").trim();
+  const candidates = [trimmed];
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)?.[1]?.trim();
+  if (fenced) candidates.push(fenced);
+  const extracted = firstBalancedJsonValue(trimmed);
+  if (extracted) candidates.push(extracted);
+  for (const candidate of [...new Set(candidates)].filter(Boolean)) {
+    try {
+      const parsed = JSON.parse(candidate);
+      assertSchema(parsed, schema);
+      return JSON.stringify(parsed);
+    } catch {
+      // Try the next bounded candidate; the caller performs one model repair.
+    }
+  }
+  return null;
+}
+
+function firstBalancedJsonValue(value: string): string | null {
+  for (let start = 0; start < value.length; start += 1) {
+    const opening = value[start];
+    if (opening !== "{" && opening !== "[") continue;
+    const stack: string[] = [];
+    let inString = false;
+    let escaped = false;
+    for (let index = start; index < value.length; index += 1) {
+      const character = value[index];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (character === "\\") escaped = true;
+        else if (character === '"') inString = false;
+        continue;
+      }
+      if (character === '"') {
+        inString = true;
+        continue;
+      }
+      if (character === "{" || character === "[") stack.push(character);
+      else if (character === "}" || character === "]") {
+        const expected = character === "}" ? "{" : "[";
+        if (stack.pop() !== expected) break;
+        if (!stack.length) return value.slice(start, index + 1);
+      }
+    }
+  }
+  return null;
 }
 
 async function callGeminiGrounded(

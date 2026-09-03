@@ -318,6 +318,69 @@ test("Gemini receives guarded inline images with structured output while text-on
   assert.deepEqual(body.generationConfig.responseJsonSchema, schema);
 });
 
+test("hosted Gemma uses prompt-constrained JSON, image-first content, and one bounded repair", async () => {
+  const requests = [];
+  const imported = await importProvidersModule(async (options) => {
+    requests.push(options);
+    return {
+      json: {
+        candidates: [{ content: { parts: [{ text: requests.length === 1 ? "I think the answer is true." : '```json\n{"ok":true}\n```' }] } }],
+      },
+    };
+  });
+  const settings = { geminiModel: "gemma-4-26b-a4b-it" };
+  const credentials = { openAiApiKey: "", geminiApiKey: "gemini-secret" };
+  const messages = [{ role: "system", content: "Return the requested diagnostic value." }, { role: "user", content: "Set ok true." }];
+  const schema = { type: "object", additionalProperties: false, required: ["ok"], properties: { ok: { type: "boolean" } } };
+  const media = [{ mimeType: "image/png", data: "aGVsbG8=" }];
+  try {
+    assert.deepEqual(
+      await imported.module.callProvider("gemini", settings, credentials, messages, schema, media),
+      { text: '{"ok":true}', model: "gemma-4-26b-a4b-it" },
+    );
+  } finally {
+    imported.cleanup();
+  }
+  assert.equal(requests.length, 2);
+  const firstBody = JSON.parse(requests[0].body);
+  assert.deepEqual(firstBody.generationConfig, { thinkingConfig: { thinkingLevel: "minimal" } });
+  assert.equal("system_instruction" in firstBody, false);
+  assert.deepEqual(firstBody.contents[0].parts[0], { inline_data: { mime_type: "image/png", data: "aGVsbG8=" } });
+  assert.match(firstBody.contents[0].parts[1].text, /Return only one valid JSON value/);
+  assert.match(firstBody.contents[0].parts[1].text, /Return the requested diagnostic value/);
+  assert.match(firstBody.contents[0].parts[1].text, /"ok"/);
+  assert.equal(firstBody.contents[0].parts[2].text, "Set ok true.");
+  const repairBody = JSON.parse(requests[1].body);
+  assert.equal(repairBody.contents.at(-2).role, "model");
+  assert.equal(repairBody.contents.at(-2).parts[0].text, "I think the answer is true.");
+  assert.match(repairBody.contents.at(-1).parts[0].text, /Return only the corrected JSON value/);
+});
+
+test("hosted Gemma rejects Google Search grounding before transport", async () => {
+  const requests = [];
+  const imported = await importProvidersModule(async (options) => {
+    requests.push(options);
+    return { json: {} };
+  });
+  try {
+    await assert.rejects(
+      () => imported.module.callProvider(
+        "gemini",
+        { geminiModel: "models/gemma-4-31b-it" },
+        { openAiApiKey: "", geminiApiKey: "gemini-secret" },
+        [{ role: "user", content: "Research this." }],
+        { type: "object" },
+        [],
+        "google-search",
+      ),
+      /grounding is unavailable for hosted Gemma/,
+    );
+  } finally {
+    imported.cleanup();
+  }
+  assert.equal(requests.length, 0);
+});
+
 test("Gemini grounds product research before a separate schema-validated extraction", async () => {
   const requests = [];
   const imported = await importProvidersModule(async (options) => {
@@ -1283,8 +1346,8 @@ test("gateway settings use a shallow three-destination routed hub", () => {
   for (const control of [
     "OpenAI API key",
     "OpenAI model",
-    "Gemini API key",
-    "Gemini model",
+    "Google AI API key",
+    "Google AI model",
     "Use local Ollama",
     "Ollama URL",
     "Ollama model",

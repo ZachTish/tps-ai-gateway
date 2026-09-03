@@ -1,5 +1,13 @@
 # TPS AI Gateway
 
+## 0.5.0
+
+- Google-hosted Gemma is now a first-class structured provider behind the existing Google AI SecretStorage credential. New installations default to the free-only `gemma-4-26b-a4b-it` model; existing saved model choices are preserved.
+- Gemma requests no longer receive Gemini-only `responseJsonSchema` fields. The Gateway instead sends the exact schema as a bounded instruction, puts attached images before their text context, validates the result locally, accepts a complete fenced or embedded JSON value, and makes at most one corrective model call before failing closed.
+- Google Search grounding fails early with a clear instruction to select a Gemini model because hosted Gemma does not provide that billed grounding capability. Gemini models retain their existing native structured-output and grounding paths.
+- The settings labels now describe the shared Google AI key/model surface without renaming persisted keys or changing the public provider ID. Minimum supported Obsidian remains 1.12.0; no settings migration is required.
+- Validation: all 31 Gateway checks passed, including exact hosted-Gemma request shape, image-first ordering, local schema validation, fenced-JSON recovery, one bounded repair, and unsupported-grounding rejection. The live Google endpoint authenticated the configured project, but model inference remained unavailable because Google reported depleted prepaid credits; no request or artifact was sent to production.
+
 ## 0.4.1
 
 - Durable text requests are still persisted before inference, but an eligible requesting device now claims and executes the new job immediately instead of waiting for a background queue scan and result polling interval.
@@ -95,7 +103,9 @@ TPS AI Gateway requires Obsidian 1.12.0 or newer because its cloud-credential co
 
 ## Providers
 
-Default order: local Ollama (`gemma3:12b`), OpenAI, then Gemini (`gemini-2.5-flash`). Missing, failed, or stalled providers fall through; each provider attempt has a 60-second ceiling so one transport cannot leave the whole request pending forever. Provider configuration lives only in this plugin. OpenAI and Gemini keys are selected through Obsidian SecretStorage and are never written to plugin `data.json`; upgrading from settings version 1 migrates any existing plaintext keys into the default device-local secret entries before purging the legacy fields. Gemini authentication uses the request header rather than a query string, and provider errors are redacted before they reach diagnostics or user notices. API keys, prompts, full responses, vault bodies, and caller-supplied metadata values or field names are not logged. Request-start diagnostics retain only the number of metadata fields alongside task, provider, message-count, and trace information.
+Default order: local Ollama (`gemma3:12b`), OpenAI, then Google AI. New installations use hosted Gemma (`gemma-4-26b-a4b-it`) for Google AI; an existing Gemini or Gemma model choice is preserved. Missing, failed, or stalled providers fall through; each provider attempt has a 60-second ceiling so one transport cannot leave the whole request pending forever. Provider configuration lives only in this plugin. OpenAI and Google AI keys are selected through Obsidian SecretStorage and are never written to plugin `data.json`; the persisted `gemini` provider/key identifiers remain stable for API and settings compatibility. Upgrading from settings version 1 migrates any existing plaintext keys into the default device-local secret entries before purging the legacy fields. Google authentication uses the request header rather than a query string, and provider errors are redacted before they reach diagnostics or user notices. API keys, prompts, full responses, vault bodies, and caller-supplied metadata values or field names are not logged. Request-start diagnostics retain only the number of metadata fields alongside task, provider, message-count, and trace information.
+
+Gemini models retain Google's native JSON-schema output. Hosted Gemma instead receives the schema as an explicit prompt, places inline images before the related text, and passes through the same client-side schema validator; malformed output gets one bounded corrective call. Google Search grounding requires a Gemini model and is rejected before transport when a Gemma model is selected.
 
 On TPS Controller devices, structured requests execute directly through that provider chain. On user-role devices, a requested OpenAI or Gemini provider executes directly when its SecretStorage credential is configured on that device. Text-only requests without a local cloud credential retain the versioned Markdown-backed JSON fallback in `_assets/TPS AI Queue`, using a file type that ordinary Obsidian Sync always carries. Any synced device with an eligible device-local Gemini/OpenAI credential can claim pending durable work, reclaim processing jobs whose claim is older than ten minutes, execute and schema-validate the request locally, write the result or compact redacted failure back to the same job, and send a TPS Notifier message without including prompt or response content. Durable non-requester workers wait through a stable stagger so the requesting device receives the first claim opportunity; the Controller and other AI-enabled devices still recover abandoned work. Every scan synchronously snapshots only Markdown descendants of the queue folder through Obsidian's public recursive traversal; unrelated vault Markdown is never enumerated, and nested jobs retain traversal order. Queue-file changes received during an active scan coalesce into one serialized trailing pass; a later burst returns to the existing debounce, and every trailing pass rechecks worker eligibility. A read, expiry-delete, or job-processing infrastructure failure is isolated to that queue file, logged with its path, and does not block later files in the snapshot. Snapshot-enumeration failures still end that pass and rely on the existing debounce or interval for a later attempt. Callers may suppress intermediate-job notifications and provide a bounded friendly workflow title; all other jobs notify once by default. The requesting device polls the synced job for up to twenty minutes and then returns the ordinary structured result to its caller. Completed and failed jobs remain available for sync recovery for 48 hours before an eligible worker removes them. Queue files contain the request messages and schema inside the user's synced vault; they contain no provider credentials. Inline images are never queued: image requests require local Gemini and either execute immediately on the requesting device or fail before any vault write.
 
@@ -127,6 +137,7 @@ Capability handlers are registered at runtime and removed when their owner unloa
 - Stalled-provider timeout/fallback and credential-redaction tests
 - Caller-controlled metadata privacy regression
 - Gemini inline-image request shape, MIME/base64/size guards, device-local routing, and no-queue image regression
+- Hosted-Gemma prompt-constrained schema, image-first content, fenced/embedded JSON normalization, bounded repair, and grounding rejection regressions
 - Gemini Google-grounding request shape, separate schema extraction, source filtering, device-local routing, and durable resume regression
 - Proposal-versus-execution guard tests
 - Plaintext-key-to-SecretStorage migration and non-overwrite tests
@@ -137,6 +148,7 @@ Capability handlers are registered at runtime and removed when their owner unloa
 
 ## Version notes
 
+- 0.5.0: Added a hosted-Gemma request path with prompt-constrained structured output, local validation, image-first input, one repair attempt, free-only Gemma 4 as the new-install default, and clearer Google AI settings labels.
 - 0.4.0: Added Gemini Google Search grounding with separate schema extraction, real grounding sources, durable queue compatibility, and an explicit public feature flag.
 - 0.3.1: Added caller-owned durable structured-text jobs that survive an app close and may be completed by any synced device with an eligible local cloud credential, while keeping inline images device-local.
 - 0.3.0: Added guarded Gemini inline-image requests and device-local cloud execution on user-role devices while keeping text-only Controller fallback and prohibiting image queue persistence.
@@ -155,10 +167,10 @@ Capability handlers are registered at runtime and removed when their owner unloa
 
 Settings open on a shallow three-destination `Choose what to configure` hub:
 
-- **Cloud providers** (default): OpenAI and Gemini device-local SecretStorage references and model names.
+- **Cloud providers** (default): OpenAI and Google AI device-local SecretStorage references and model names, including hosted Gemini and Gemma.
 - **Local Ollama**: the local-first toggle, endpoint, and model.
 - **Diagnostics**: privacy-safe logging.
 
-Only the selected destination is rendered, there are no nested disclosures, and route selection is transient rather than persisted. No provider, credential, model, or diagnostics setting was renamed or migrated. Native `aria-pressed` route buttons, visible focus styling, page-heading focus restoration, and a horizontal mobile route strip keep the same controls usable in narrow settings views.
+Only the selected destination is rendered, there are no nested disclosures, and route selection is transient rather than persisted. Display labels now call the shared Google surface **Google AI**, while persisted provider, credential, model, and diagnostics keys remain unchanged and require no migration. Native `aria-pressed` route buttons, visible focus styling, page-heading focus restoration, and a horizontal mobile route strip keep the same controls usable in narrow settings views.
 
 - 2026-07-13: Separated optional local inference and diagnostics from core cloud-provider configuration, added matching settings styles, and kept all optional sections collapsed by default. Validation: settings hierarchy audit, full test suite, production build/deploy, and Obsidian reload.
