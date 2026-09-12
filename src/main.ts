@@ -598,7 +598,6 @@ class AiGatewaySettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "TPS AI Gateway" });
-    containerEl.createEl("p", { text: "Central AI transport for TPS. Domain plugins retain ownership of actions and resource creation." });
 
     containerEl.createEl("h3", { cls: "tps-ai-settings-hub-heading", text: "Choose what to configure" });
     const hub = containerEl.createDiv({ cls: "tps-ai-settings-hub" });
@@ -610,12 +609,11 @@ class AiGatewaySettingTab extends PluginSettingTab {
         attr: {
           type: "button",
           "aria-pressed": String(isActive),
-          "aria-label": `${route.title}: ${route.description}`,
+          "aria-label": route.title,
         },
       });
       if (isActive) activeRouteButton = button;
       button.createSpan({ cls: "tps-ai-settings-route-title", text: route.title });
-      button.createSpan({ cls: "tps-ai-settings-route-description", text: route.description });
       button.addEventListener("click", () => {
         if (this.activeRoute === route.id) return;
         this.activeRoute = route.id;
@@ -629,7 +627,6 @@ class AiGatewaySettingTab extends PluginSettingTab {
       text: route.title,
       attr: { tabindex: "-1" },
     });
-    page.createEl("p", { cls: "setting-item-description", text: route.description });
 
     if (this.activeRoute === "cloud") {
       secretReferenceSetting(page, this.plugin, "OpenAI API key", "Select or create a device-local Obsidian secret. API billing is separate from ChatGPT/Codex subscriptions.", "openAiApiKeySecret");

@@ -1,3 +1,9 @@
+## 0.6.1 — cleaner settings copy
+
+Removed generic settings introductions and repeated navigation/page descriptions. Existing destinations, default route, optional disclosures, control labels/options, commands/actions, conditional visibility, focus behavior, and narrow-screen layout remain unchanged. Useful guidance about consequences, ownership, credentials, and non-obvious inputs stays beside its setting; dynamic status/counts remain. This presentation patch changes no settings schema, defaults, note data, provider behavior, or automation.
+
+Validated on 2026-09-12: source control/action/option/binding inventories preserved; full `npm test` passed (34 tests). Separate `npm run build` deployed to the isolated test vault. Reloaded settings routes render without generic subtitles, and route navigation leaves settings unchanged. Native navigation, focus styles, and existing narrow-screen strips are retained. Release notes record exact results, route verification, and SHA-256 hashes. Minimum Obsidian remains 1.12.0. Production installation is the user's BRAT pull. Unrelated working-tree changes are excluded.
+
 # TPS AI Gateway
 
 ## 0.5.0
