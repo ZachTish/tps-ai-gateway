@@ -18,6 +18,7 @@ const schemaModule = transformSync(schemaSource, { loader: "ts", format: "esm", 
 const { assertSchema } = await import(`data:text/javascript;base64,${Buffer.from(schemaModule).toString("base64")}`);
 const settingsModule = transformSync(settingsSource, { loader: "ts", format: "esm", target: "es2020" }).code;
 const {
+  resolveDeviceSettings,
   AiGatewaySettingsSaveCoordinator,
   changedSettingsKeys,
   mergeChangedSettings,
@@ -1517,4 +1518,14 @@ test("gateway settings use a shallow three-destination routed hub", () => {
   assert.match(stylesSource, /\.tps-ai-settings-page \.setting-item\s*\{[^}]*flex-direction:\s*column/s);
   assert.match(stylesSource, /\.tps-ai-settings-page \.setting-item-control\s*\{[^}]*width:\s*100%/s);
   assert.match(stylesSource, /\.tps-ai-settings-page \.setting-item-control input\[type="text"\][\s\S]*width:\s*100%/);
+});
+
+test("device provider settings isolate two devices and retain explicit disabled values", () => {
+  const legacy = {ollamaUrl:"http://old-host:11434",ollamaEnabled:true};
+  const first = resolveDeviceSettings(null, legacy);
+  const second = resolveDeviceSettings(null, legacy);
+  first.ollamaEnabled = false; first.ollamaUrl = "http://localhost:11434";
+  assert.equal(resolveDeviceSettings(first, {ollamaEnabled:true}).ollamaEnabled, false);
+  assert.equal(resolveDeviceSettings(second, first).ollamaUrl, legacy.ollamaUrl);
+  assert.match(main, /loadLatest: async \(\) => this.app.loadLocalStorage\(DEVICE_SETTINGS_KEY\)/);
 });

@@ -1,3 +1,4 @@
+import { DEVICE_SETTINGS_KEY, resolveDeviceSettings } from "./settings";
 import { App, Notice, Platform, Plugin, PluginSettingTab, SecretComponent, Setting, TFile, Vault } from "obsidian";
 import { callProvider } from "./providers";
 import { withProviderTimeout } from "./provider-timeout";
@@ -521,18 +522,19 @@ export default class TpsAiGatewayPlugin extends Plugin {
 
   async loadSettings(): Promise<void> {
     const raw = await this.loadData();
-    this.settings = sanitizeSettings(raw);
+    this.settings = resolveDeviceSettings(this.app.loadLocalStorage(DEVICE_SETTINGS_KEY), raw);
     logger.setLogging(this.settings.enableLogging);
     const migration = planLegacyApiKeyMigration(raw, this.settings, (name) => this.app.secretStorage.getSecret(name));
     for (const write of migration.writes) this.app.secretStorage.setSecret(write.secretName, write.value);
     if (migration.shouldPersist) {
-      const migrated = createMigratedSettingsPayload(raw, this.settings);
+      const migrated = createMigratedSettingsPayload(raw, sanitizeSettings(raw));
       await this.saveData(migrated);
-      this.settings = sanitizeSettings(migrated);
+      // Retain the device snapshot; legacy shared data only supplies first-run defaults.
     }
+    this.app.saveLocalStorage(DEVICE_SETTINGS_KEY, this.settings);
     this.settingsPersistence = new AiGatewaySettingsSaveCoordinator({
-      loadLatest: () => this.loadData(),
-      saveMerged: (value) => this.saveData(value),
+      loadLatest: async () => this.app.loadLocalStorage(DEVICE_SETTINGS_KEY),
+      saveMerged: async (value) => { this.app.saveLocalStorage(DEVICE_SETTINGS_KEY, value); },
       onPersisted: (requested, persisted) => reconcilePersistedSettings(this.settings, requested, persisted),
     }, this.settings);
     if (migration.writes.length) logger.flow("Settings", "legacy-api-keys-migrated", { providers: migration.writes.map((write) => write.provider) });
@@ -635,7 +637,7 @@ class AiGatewaySettingTab extends PluginSettingTab {
       textSetting(page, this.plugin, "Google AI model", "Hosted Gemini or Gemma model ID. New setups default to the free-only Gemma 4 26B A4B model.", "geminiModel");
     } else if (this.activeRoute === "local") {
       new Setting(page)
-        .setName("Use TishOS Apple Intelligence")
+        .setName("Use TishOS Apple Intelligence · This device")
         .setDesc("On iPhone or iPad, hand text-only structured requests to TishOS. TishOS prefers Apple's Private Cloud Compute model when the signed app and device are eligible, then falls back to Apple's on-device model.")
         .addToggle((toggle) => toggle
           .setValue(this.plugin.settings.appleIntelligenceEnabled)
@@ -643,11 +645,11 @@ class AiGatewaySettingTab extends PluginSettingTab {
             this.plugin.settings.appleIntelligenceEnabled = value;
             await this.plugin.saveSettings();
           }));
-      new Setting(page).setName("Use local Ollama").setDesc("Try local structured inference before configured cloud providers.").addToggle((toggle) => toggle.setValue(this.plugin.settings.ollamaEnabled).onChange(async (value) => { this.plugin.settings.ollamaEnabled = value; await this.plugin.saveSettings(); }));
+      new Setting(page).setName("Use local Ollama · This device").setDesc("Try local structured inference before configured cloud providers.").addToggle((toggle) => toggle.setValue(this.plugin.settings.ollamaEnabled).onChange(async (value) => { this.plugin.settings.ollamaEnabled = value; await this.plugin.saveSettings(); }));
       textSetting(page, this.plugin, "Ollama URL", "Local or secured Ollama endpoint.", "ollamaUrl");
       textSetting(page, this.plugin, "Ollama model", "Local structured-output model.", "ollamaModel");
     } else {
-      new Setting(page).setName("Enable logging").setDesc("Log provider/capability routing and metadata counts without prompts, responses, metadata values, or secrets.").addToggle((toggle) => toggle.setValue(this.plugin.settings.enableLogging).onChange(async (value) => { this.plugin.settings.enableLogging = value; await this.plugin.saveSettings(); }));
+      new Setting(page).setName("Enable logging · This device").setDesc("Log provider/capability routing and metadata counts without prompts, responses, metadata values, or secrets.").addToggle((toggle) => toggle.setValue(this.plugin.settings.enableLogging).onChange(async (value) => { this.plugin.settings.enableLogging = value; await this.plugin.saveSettings(); }));
     }
 
     if (focusPageHeading) {
@@ -669,9 +671,9 @@ const AI_SETTINGS_ROUTES: ReadonlyArray<{ id: AiSettingsRoute; title: string; de
 ];
 
 type TextSettingKey = "ollamaUrl" | "ollamaModel" | "openAiModel" | "geminiModel";
-function textSetting(container: HTMLElement, plugin: TpsAiGatewayPlugin, name: string, description: string, key: TextSettingKey): void { new Setting(container).setName(name).setDesc(description).addText((text) => text.setValue(plugin.settings[key]).onChange(async (value) => { plugin.settings[key] = value.trim(); await plugin.saveSettings(); })); }
+function textSetting(container: HTMLElement, plugin: TpsAiGatewayPlugin, name: string, description: string, key: TextSettingKey): void { new Setting(container).setName(`${name} · This device`).setDesc(description).addText((text) => text.setValue(plugin.settings[key]).onChange(async (value) => { plugin.settings[key] = value.trim(); await plugin.saveSettings(); })); }
 function secretReferenceSetting(container: HTMLElement, plugin: TpsAiGatewayPlugin, name: string, description: string, key: "openAiApiKeySecret" | "geminiApiKeySecret"): void {
-  new Setting(container).setName(name).setDesc(description).addComponent((element) => new SecretComponent(plugin.app, element)
+  new Setting(container).setName(`${name} · This device`).setDesc(description).addComponent((element) => new SecretComponent(plugin.app, element)
     .setValue(plugin.settings[key])
     .onChange(async (value) => {
       plugin.settings[key] = value;

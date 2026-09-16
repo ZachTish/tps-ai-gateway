@@ -266,3 +266,10 @@ export function planLegacyApiKeyMigration(
     || !raw.providerOrder.includes("apple");
   return { writes, shouldPersist };
 }
+
+export const DEVICE_SETTINGS_KEY = "tps-ai-gateway-settings-v1";
+
+// A stored local snapshot always wins, including false toggles and empty routes.
+export function resolveDeviceSettings(local: unknown, legacy: unknown): AiGatewaySettings {
+  return sanitizeSettings(local != null ? local : legacy);
+}
