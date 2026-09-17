@@ -1,11 +1,11 @@
 {
   "name": "tps-ai-gateway",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "AI transport and guarded decision gateway for TPS plugins.",
   "main": "main.js",
   "scripts": {
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
-    "test": "node --test scripts/test-gateway.mjs && npm run build"
+    "test": "node --test scripts/test-gateway.mjs scripts/test-settings-ui.mjs && npm run build"
   },
   "license": "MIT",
   "devDependencies": {

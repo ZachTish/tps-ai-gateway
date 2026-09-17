@@ -77,23 +77,33 @@ export default class TpsAiGatewayPlugin extends Plugin {
       if (!DURABLE_JOB_ID_PATTERN.test(request.durableJobId)) throw new Error("AI gateway durableJobId is invalid.");
       return this.completeStructuredDurably<T>(request);
     }
-    if (this.shouldUseTishOSAppleIntelligence(request)) {
+    const requested = request.preferredProviders?.length ? request.preferredProviders : this.settings.providerOrder;
+    const providers = [...new Set([...requested, ...this.settings.providerOrder])]
+      .filter((provider) => !(request.grounding || request.media?.length) || provider === "gemini");
+    let attempts = 0;
+    let lastError: unknown;
+    for (const provider of providers) {
+      if (provider === "apple" && !this.shouldUseTishOSAppleIntelligence({ ...request, preferredProviders: [provider] })) continue;
+      if (provider === "ollama" && !this.settings.ollamaEnabled) continue;
+      if (!this.isControllerDevice() && (provider === "openai" || provider === "gemini")
+        && !this.deviceLocalCloudProviders({ ...request, preferredProviders: [provider] }).length) continue;
+      attempts += 1;
       try {
-        return await this.completeStructuredWithTishOSAppleIntelligence<T>(request);
+        const result = provider === "apple"
+          ? await this.completeStructuredWithTishOSAppleIntelligence<T>(request)
+          : await this.completeStructuredLocally<T>({ ...request, preferredProviders: [provider] }, [provider]);
+        return { ...result, attempts: attempts - 1 + (result.attempts || 1) };
       } catch (error) {
-        logger.warn("Request", "apple-intelligence-failed", {
-          taskId: request.taskId,
-          reason: logger.errorSummary(error),
-        });
+        // A queued handoff is still running; starting a backup could duplicate it.
+        if ((error as any)?.code === "TPS_AI_JOB_PENDING") throw error;
+        lastError = error;
+        logger.warn("Request", "route-failed", { taskId: request.taskId, provider, reason: logger.errorSummary(error) });
       }
     }
-    if (!this.isControllerDevice()) {
-      const localCloudProviders = this.deviceLocalCloudProviders(request);
-      if (localCloudProviders.length) return this.completeStructuredLocally<T>({ ...request, preferredProviders: localCloudProviders });
-      if (request.media?.length) throw new Error("Image requests require Gemini to be configured in TPS AI Gateway on this device.");
-      return this.completeStructuredRemotely<T>(request);
-    }
-    return this.completeStructuredLocally<T>(request);
+    if (attempts) throw lastError;
+    if (request.media?.length) throw new Error("Image requests require Gemini to be configured in TPS AI Gateway on this device.");
+    if (!providers.length) throw new Error("Choose a primary AI provider in TPS AI Gateway.");
+    return this.completeStructuredRemotely<T>(request);
   }
 
   private deviceLocalCloudProviders(request: StructuredRequest): AiProviderId[] {
@@ -114,7 +124,7 @@ export default class TpsAiGatewayPlugin extends Plugin {
     const requested = request.preferredProviders?.length
       ? request.preferredProviders
       : this.settings.providerOrder;
-    return requested.includes("apple");
+    return requested.find((provider) => provider !== "ollama" || this.settings.ollamaEnabled) === "apple";
   }
 
   private async completeStructuredWithTishOSAppleIntelligence<T>(request: StructuredRequest): Promise<StructuredResult<T>> {
@@ -587,88 +597,131 @@ function remoteJobMatchesRequest(job: RemoteAiJob, request: StructuredRequest): 
     && JSON.stringify(job.metadata || {}) === JSON.stringify(request.metadata || {});
 }
 
-class AiGatewaySettingTab extends PluginSettingTab {
-  private activeRoute: AiSettingsRoute = "cloud";
+export class AiGatewaySettingTab extends PluginSettingTab {
+  private backupEditor: AiProviderId | null = null;
 
   constructor(app: App, private plugin: TpsAiGatewayPlugin) { super(app, plugin); }
 
-  display(): void {
-    this.renderSettings(false);
+  display(): void { this.renderSettings(); }
+
+  private async selectPrimary(provider: AiProviderId): Promise<void> {
+    this.plugin.settings.providerOrder = [provider, ...this.plugin.settings.providerOrder.slice(1).filter((item) => item !== provider)];
+    await this.plugin.saveSettings();
+    this.renderSettings("primary");
   }
 
-  private renderSettings(focusPageHeading: boolean): void {
+  private renderSettings(focus?: string): void {
     const { containerEl } = this;
+    const scrollTop = containerEl.scrollTop;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "TPS AI Gateway" });
-
-    containerEl.createEl("h3", { cls: "tps-ai-settings-hub-heading", text: "Choose what to configure" });
-    const hub = containerEl.createDiv({ cls: "tps-ai-settings-hub" });
-    let activeRouteButton: HTMLButtonElement | null = null;
-    for (const route of AI_SETTINGS_ROUTES) {
-      const isActive = route.id === this.activeRoute;
-      const button = hub.createEl("button", {
-        cls: "tps-ai-settings-route-button",
-        attr: {
-          type: "button",
-          "aria-pressed": String(isActive),
-          "aria-label": route.title,
-        },
-      });
-      if (isActive) activeRouteButton = button;
-      button.createSpan({ cls: "tps-ai-settings-route-title", text: route.title });
+    containerEl.addClass("tps-ai-settings-page");
+    containerEl.createEl("h2", { text: "AI configuration" });
+    const primary = this.plugin.settings.providerOrder[0];
+    const mode = providerMode(primary);
+    const primarySetting = new Setting(containerEl).setName("Primary AI · This device").setDesc("Choose where ordinary AI requests run first.");
+    const modes = primarySetting.controlEl.createDiv({ cls: "tps-ai-settings-modes", attr: { role: "group", "aria-label": "Primary AI" } });
+    for (const option of AI_MODES) {
+      const button = modes.createEl("button", { text: option.title, cls: "tps-ai-settings-mode", attr: {
+        type: "button", "aria-pressed": String(mode === option.id), "data-ai-focus": mode === option.id ? "primary" : option.id,
+      } });
       button.addEventListener("click", () => {
-        if (this.activeRoute === route.id) return;
-        this.activeRoute = route.id;
-        this.renderSettings(true);
+        if (mode === option.id) return;
+        const provider = option.id === "cloud"
+          ? this.plugin.settings.providerOrder.find((item) => providerMode(item) === "cloud") ?? "gemini"
+          : option.id === "device" ? "ollama" : "apple";
+        void this.selectPrimary(provider);
       });
     }
+    if (!primary) containerEl.createEl("p", { text: "No primary provider is selected. Choose an AI mode above." });
+    if (mode === "cloud") {
+      new Setting(containerEl).setName("Cloud provider").addDropdown((dropdown) => dropdown
+        .addOption("gemini", "Google AI").addOption("openai", "OpenAI").setValue(primary)
+        .onChange((value) => { void this.selectPrimary(value as AiProviderId); }));
+    }
+    if (primary) this.renderProvider(containerEl.createDiv({ cls: "tps-ai-settings-provider" }), primary);
 
-    const route = AI_SETTINGS_ROUTES.find((candidate) => candidate.id === this.activeRoute) ?? AI_SETTINGS_ROUTES[0];
-    const page = containerEl.createDiv({ cls: "tps-ai-settings-page" });
-    const pageHeading = page.createEl("h3", {
-      text: route.title,
-      attr: { tabindex: "-1" },
+    const backups = this.plugin.settings.providerOrder.slice(1);
+    const backupSetting = new Setting(containerEl).setName("Backup AI · This device")
+      .setDesc("Try this provider if an ordinary request fails. Choosing a backup replaces the existing backup chain.");
+    backupSetting.addDropdown((dropdown) => {
+      dropdown.selectEl.setAttribute("aria-label", "Backup AI");
+      dropdown.selectEl.setAttribute("data-ai-focus", "backup");
+      dropdown.addOption("none", "None");
+      if (backups.length > 1) dropdown.addOption("existing", `Keep existing backups (${backups.length})`);
+      for (const provider of AI_PROVIDERS) if (provider !== primary) dropdown.addOption(provider, providerLabel(provider));
+      dropdown.setValue(backups.length > 1 ? "existing" : backups[0] ?? "none");
+      dropdown.setDisabled(!primary);
+      dropdown.onChange(async (value) => {
+        if (value === "existing") return;
+        this.plugin.settings.providerOrder = [primary, ...(value === "none" ? [] : [value as AiProviderId])];
+        await this.plugin.saveSettings();
+        this.renderSettings("backup");
+      });
     });
-
-    if (this.activeRoute === "cloud") {
-      secretReferenceSetting(page, this.plugin, "OpenAI API key", "Select or create a device-local Obsidian secret. API billing is separate from ChatGPT/Codex subscriptions.", "openAiApiKeySecret");
-      textSetting(page, this.plugin, "OpenAI model", "OpenAI structured-output model.", "openAiModel");
-      secretReferenceSetting(page, this.plugin, "Google AI API key", "Select or create a device-local Obsidian secret for hosted Gemini or Gemma text and image requests on this device.", "geminiApiKeySecret");
-      textSetting(page, this.plugin, "Google AI model", "Hosted Gemini or Gemma model ID. New setups default to the free-only Gemma 4 26B A4B model.", "geminiModel");
-    } else if (this.activeRoute === "local") {
-      new Setting(page)
-        .setName("Use TishOS Apple Intelligence · This device")
-        .setDesc("On iPhone or iPad, hand text-only structured requests to TishOS. TishOS prefers Apple's Private Cloud Compute model when the signed app and device are eligible, then falls back to Apple's on-device model.")
-        .addToggle((toggle) => toggle
-          .setValue(this.plugin.settings.appleIntelligenceEnabled)
-          .onChange(async (value) => {
-            this.plugin.settings.appleIntelligenceEnabled = value;
-            await this.plugin.saveSettings();
-          }));
-      new Setting(page).setName("Use local Ollama · This device").setDesc("Try local structured inference before configured cloud providers.").addToggle((toggle) => toggle.setValue(this.plugin.settings.ollamaEnabled).onChange(async (value) => { this.plugin.settings.ollamaEnabled = value; await this.plugin.saveSettings(); }));
-      textSetting(page, this.plugin, "Ollama URL", "Local or secured Ollama endpoint.", "ollamaUrl");
-      textSetting(page, this.plugin, "Ollama model", "Local structured-output model.", "ollamaModel");
-    } else {
-      new Setting(page).setName("Enable logging · This device").setDesc("Log provider/capability routing and metadata counts without prompts, responses, metadata values, or secrets.").addToggle((toggle) => toggle.setValue(this.plugin.settings.enableLogging).onChange(async (value) => { this.plugin.settings.enableLogging = value; await this.plugin.saveSettings(); }));
-    }
-
-    if (focusPageHeading) {
-      containerEl.scrollTop = 0;
-      window.requestAnimationFrame(() => {
-        activeRouteButton?.scrollIntoView({ block: "nearest", inline: "nearest" });
-        pageHeading.focus({ preventScroll: true });
-        pageHeading.scrollIntoView({ block: "start" });
+    if (backups.length > 1) containerEl.createEl("p", { cls: "tps-ai-settings-note", text: `Backup order: ${backups.map(providerLabel).join(" → ")}` });
+    if (backups.length) {
+      if (!this.backupEditor || !backups.includes(this.backupEditor)) this.backupEditor = backups[0];
+      if (backups.length > 1) new Setting(containerEl).setName("Configure existing backup").addDropdown((dropdown) => {
+        dropdown.selectEl.setAttribute("aria-label", "Configure existing backup");
+        dropdown.selectEl.setAttribute("data-ai-focus", "backup-editor");
+        for (const provider of backups) dropdown.addOption(provider, providerLabel(provider));
+        dropdown.setValue(this.backupEditor!).onChange((value) => {
+          this.backupEditor = value as AiProviderId;
+          this.renderSettings("backup-editor");
+        });
       });
+      this.renderProvider(containerEl.createDiv({ cls: "tps-ai-settings-provider" }), this.backupEditor);
+    }
+    containerEl.createEl("p", { cls: "tps-ai-settings-note", text: "Backups apply to ordinary requests. Durable jobs keep their TishOS or synced-queue route. Provider-specific requests may require a different provider." });
+    const diagnostics = containerEl.createEl("details", { cls: "tps-ai-settings-diagnostics" });
+    diagnostics.createEl("summary", { text: "Diagnostics" });
+    new Setting(diagnostics).setName("Enable logging · This device").setDesc("Log routing without prompts, responses, metadata values, or secrets.")
+      .addToggle((toggle) => toggle.setValue(this.plugin.settings.enableLogging).onChange(async (value) => {
+        this.plugin.settings.enableLogging = value;
+        await this.plugin.saveSettings();
+      }));
+    if (focus) {
+      containerEl.scrollTop = scrollTop;
+      containerEl.querySelector<HTMLElement>(`[data-ai-focus="${focus}"]`)?.focus({ preventScroll: true });
+    }
+  }
+
+  private renderProvider(container: HTMLElement, provider: AiProviderId): void {
+    if (provider === "openai") {
+      secretReferenceSetting(container, this.plugin, "OpenAI API key", "Choose a device-local Obsidian secret. API billing is separate from ChatGPT subscriptions.", "openAiApiKeySecret");
+      textSetting(container, this.plugin, "OpenAI model", "Structured-output model ID.", "openAiModel");
+    } else if (provider === "gemini") {
+      secretReferenceSetting(container, this.plugin, "Google AI API key", "Choose a device-local Obsidian secret for hosted Gemini or Gemma.", "geminiApiKeySecret");
+      textSetting(container, this.plugin, "Google AI model", "Hosted Gemini or Gemma model ID.", "geminiModel");
+    } else if (provider === "ollama") {
+      new Setting(container).setName("Use local Ollama · This device").setDesc("Run through Ollama on this device or a secured endpoint.")
+        .addToggle((toggle) => toggle.setValue(this.plugin.settings.ollamaEnabled).onChange(async (value) => {
+          this.plugin.settings.ollamaEnabled = value; await this.plugin.saveSettings();
+        }));
+      textSetting(container, this.plugin, "Ollama URL", "Loopback requires Ollama on this device; mobile needs a reachable secured endpoint.", "ollamaUrl");
+      textSetting(container, this.plugin, "Ollama model", "Local structured-output model.", "ollamaModel");
+    } else {
+      new Setting(container).setName("Use TishOS Apple Intelligence · This device")
+        .setDesc("TishOS handles text requests on iPhone/iPad using Apple Private Cloud Compute when eligible, otherwise on-device AI.")
+        .addToggle((toggle) => toggle.setValue(this.plugin.settings.appleIntelligenceEnabled).onChange(async (value) => {
+          this.plugin.settings.appleIntelligenceEnabled = value; await this.plugin.saveSettings();
+        }));
     }
   }
 }
 
-type AiSettingsRoute = "cloud" | "local" | "diagnostics";
-const AI_SETTINGS_ROUTES: ReadonlyArray<{ id: AiSettingsRoute; title: string; description: string }> = [
-  { id: "cloud", title: "Cloud providers", description: "Choose device-local credentials and models for OpenAI and Google AI." },
-  { id: "local", title: "Device AI", description: "Configure Apple Intelligence and optional local Ollama inference." },
-  { id: "diagnostics", title: "Diagnostics", description: "Control privacy-safe provider and capability routing logs." },
-];
+const AI_MODES = [
+  { id: "cloud", title: "Cloud" },
+  { id: "device", title: "On device" },
+  { id: "tps", title: "TPS routed" },
+] as const;
+const AI_PROVIDERS: AiProviderId[] = ["gemini", "openai", "ollama", "apple"];
+function providerMode(provider?: AiProviderId): string {
+  return provider === "apple" ? "tps" : provider === "ollama" ? "device" : provider ? "cloud" : "";
+}
+function providerLabel(provider: AiProviderId): string {
+  return { gemini: "Cloud · Google AI", openai: "Cloud · OpenAI", ollama: "On device · Ollama", apple: "TPS routed · Apple Intelligence" }[provider];
+}
 
 type TextSettingKey = "ollamaUrl" | "ollamaModel" | "openAiModel" | "geminiModel";
 function textSetting(container: HTMLElement, plugin: TpsAiGatewayPlugin, name: string, description: string, key: TextSettingKey): void { new Setting(container).setName(`${name} · This device`).setDesc(description).addText((text) => text.setValue(plugin.settings[key]).onChange(async (value) => { plugin.settings[key] = value.trim(); await plugin.saveSettings(); })); }

@@ -2,7 +2,7 @@
 
 Structured AI requests and guarded, domain-owned capabilities for TPS plugins.
 
-Current release: [0.7.0](https://github.com/ZachTish/tps-ai-gateway/releases/tag/0.7.0) · Obsidian 1.12.0+ · Desktop and mobile.
+Current release: [0.8.0](https://github.com/ZachTish/tps-ai-gateway/releases/tag/0.8.0) · Obsidian 1.12.0+ · Desktop and mobile.
 
 ## Install with BRAT
 
@@ -10,9 +10,23 @@ Add `ZachTish/tps-ai-gateway` to BRAT. Use manual updates with `Latest`, or free
 
 ## Configure this device
 
-The settings hub contains **Cloud providers** (default), **Device AI**, and **Diagnostics**. Provider order, enablement, endpoints/models, secret references, and diagnostics are stored in vault-scoped device-local storage and labeled **This device**. First use imports legacy preferences once; a stored local choice wins afterward, including disabled toggles. Actual API keys stay in Obsidian SecretStorage.
+One **AI configuration** page contains **Primary AI** with three choices: **Cloud** (Google AI or OpenAI), **On device** (Ollama), and **TPS routed** (TishOS Apple Intelligence). **Backup AI** sits directly below, with None or a specific provider. Only the primary and selected backup editors appear. An existing longer backup chain is preserved until explicitly replaced; its selector lets you edit each existing backup in place. Switching the primary replaces the first provider and removes duplicates from the remaining backups. Disabled Ollama and Apple routes retain editable controls and their existing enablement toggles.
 
-Configure OpenAI or Google AI under Cloud providers. Device AI configures the TishOS Apple Intelligence handoff and optional Ollama. Enabling Apple Intelligence does not establish device/model eligibility or Apple Private Cloud Compute entitlement. Provider availability is determined at execution time.
+Provider order, enablement, endpoints/models, secret references, and diagnostics remain in the same vault-scoped device-local storage. Actual API keys stay in Obsidian SecretStorage. Opening the page never saves settings or sends a request. There are no new persisted keys, defaults, or migrations. Backup editor selection and focus are transient.
+
+Ordinary requests try providers in order, including Apple as a backup after cloud. Ollama can run directly on user-role devices as well as Controllers. Missing credentials, disabled providers, or unavailable Apple platforms are skipped. Provider-specific requests can prefer another provider; images and grounding use Google AI. A pending Apple handoff does not start a duplicate backup. Existing durable queue contracts are retained: Apple-first durable jobs remain exclusively with TishOS; cloud queue workers do not launch Apple backups, and durable Ollama work still needs an eligible Controller worker. Text without a usable local provider retains the existing synced queue fallback. Thus None removes configured provider backups; it does not disable durable queue recovery or caller-specified providers.
+
+TishOS Apple Intelligence is available through the existing iPhone/iPad handoff. It may use Apple Private Cloud Compute when eligible, then the on-device model; TPS routed is not a promise of strictly on-device inference. Ollama loopback requires a running server on the same device; mobile needs a reachable secured endpoint.
+
+**Diagnostics** is the single intentional disclosure at the bottom. The previous Cloud providers, Device AI, and Diagnostics destinations are removed. Native mode buttons expose `aria-pressed`, conditional rerenders restore focus, and all CSS is plugin-scoped. On narrow screens settings stack, mode choices form a compact scrollable strip, fields fill the width, and navigation is not sticky. Extend this page for related configuration rather than reintroducing separate provider pages.
+
+Preserved control inventory: OpenAI secret/model, Google AI secret/model, Apple enablement, Ollama enablement/URL/model, and logging. The Validate provider chain command and all public API actions remain available. Added controls are primary mode/cloud provider, optional backup, and the transient editor selector for legacy backup chains.
+
+## 0.8.0 validation and release
+
+This backward-compatible minor release adds explicit primary/backup controls and consolidates configuration. Minimum Obsidian remains 1.12.0. Regression coverage includes every mode, conditional controls, disabled-provider editing, legacy chains, empty routes, focus and selection state, disclosure depth, mobile CSS, provider order, pending-handoff safety, and direct Ollama on a user device. The full suite contains 42 checks; the production build includes TypeScript validation. On 2026-09-17, the full 42-check suite passed and the separate final production build deployed only to `[runtime-deploy] target=test`. The plugin was reloaded with `obsidian plugin:reload id=tps-ai-gateway` in the verified Obsidian Plugin Test Vault. Desktop and a 600 px settings window were inspected: all three modes, Google/OpenAI credentials and models, Ollama controls, Apple controls, None/provider backups, legacy backup editors, focus restoration, and the single Diagnostics disclosure. Mode changes were exercised against an in-memory settings-tab fixture with a no-op save method, so real provider settings were never changed. The narrow layout had no horizontal overflow. Device-local settings and runtime `data.json` SHA-256 hashes matched their pre-QA values. No inference command, credential picker, or external automation was invoked. Artifact hashes are in the release notes; production was not accessed.
+
+The release was isolated on `feature/unified-ai-settings` in the contained `tps-ai-gateway Unified Settings (Worktree)` checkout from current `origin/main`, preserving the older canonical checkout’s unrelated README and ignore-file edits.
 
 ## Request and capability contracts
 

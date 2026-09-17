@@ -711,7 +711,7 @@ test("gateway separates proposals from guarded execution", () => {
 });
 
 test("gateway uses device-local cloud credentials and reserves durable text work for the synced queue", async () => {
-  assert.match(main, /deviceLocalCloudProviders\(request\)/);
+  assert.match(main, /deviceLocalCloudProviders\(\{ \.\.\.request, preferredProviders: \[provider\] \}\)/);
   assert.match(main, /Image requests require Gemini to be configured in TPS AI Gateway on this device/);
   assert.match(main, /controller\?\.api\?\.isController\?\.\(\) === true/);
   assert.match(main, /this\.app\.vault\.create\(path, JSON\.stringify\(job, null, 2\)\)/);
@@ -1484,40 +1484,19 @@ test("remote queue skips a requested trailing pass after all processing authorit
   assert.equal(plugin.remoteQueueRescanRequested, false);
 });
 
-test("gateway settings use a shallow three-destination routed hub", () => {
-  assert.match(main, /Choose what to configure/);
-  assert.match(main, /title: "Cloud providers"/);
-  assert.match(main, /title: "Device AI"/);
-  assert.match(main, /title: "Diagnostics"/);
-  assert.match(main, /"aria-pressed": String\(isActive\)/);
-  assert.match(main, /pageHeading\.focus\(\{ preventScroll: true \}\)/);
-  assert.match(main, /pageHeading\.scrollIntoView\(\{ block: "start" \}\)/);
-  assert.match(main, /activeRouteButton\?\.scrollIntoView\(\{ block: "nearest", inline: "nearest" \}\)/);
-  assert.doesNotMatch(main, /createEl\("details"/);
-  assert.doesNotMatch(main, /tps-collapsible-section/);
-
-  for (const control of [
-    "OpenAI API key",
-    "OpenAI model",
-    "Google AI API key",
-    "Google AI model",
-    "Use local Ollama",
-    "Ollama URL",
-    "Ollama model",
-    "Enable logging",
-  ]) {
-    assert.match(main, new RegExp(control.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  }
-
-  assert.match(stylesSource, /\.tps-ai-settings-route-button:focus-visible/);
-  assert.match(stylesSource, /\.tps-ai-settings-page > h3:focus-visible/);
+test("gateway settings use one configuration page with one diagnostics disclosure", () => {
+  for (const label of ["AI configuration", "Cloud", "On device", "TPS routed", "Primary AI", "Backup AI", "OpenAI API key", "OpenAI model", "Google AI API key", "Google AI model", "Use local Ollama", "Ollama URL", "Ollama model", "Use TishOS Apple Intelligence", "Enable logging"]) assert.ok(main.includes(label), label);
+  assert.doesNotMatch(main, /Choose what to configure|AI_SETTINGS_ROUTES|activeRoute/);
+  assert.equal((main.match(/createEl\("details"/g) || []).length, 1);
+  assert.match(main, /"aria-pressed": String\(mode === option.id\)/);
+  assert.match(main, /focus\(\{ preventScroll: true \}\)/);
+  assert.match(stylesSource, /:focus-visible/);
   assert.match(stylesSource, /height: auto/);
-  assert.match(stylesSource, /\.tps-ai-settings-page > h3\s*\{[^}]*scroll-margin-top:/s);
+  assert.match(stylesSource, /\.tps-ai-settings-modes button\.tps-ai-settings-mode \{ width: auto/);
   assert.match(stylesSource, /@media \(max-width: 700px\)/);
   assert.match(stylesSource, /overflow-x: auto/);
-  assert.match(stylesSource, /\.tps-ai-settings-page \.setting-item\s*\{[^}]*flex-direction:\s*column/s);
-  assert.match(stylesSource, /\.tps-ai-settings-page \.setting-item-control\s*\{[^}]*width:\s*100%/s);
-  assert.match(stylesSource, /\.tps-ai-settings-page \.setting-item-control input\[type="text"\][\s\S]*width:\s*100%/);
+  assert.match(stylesSource, /flex-direction: column/);
+  assert.match(stylesSource, /width: 100%/);
 });
 
 test("device provider settings isolate two devices and retain explicit disabled values", () => {
@@ -1528,4 +1507,47 @@ test("device provider settings isolate two devices and retain explicit disabled 
   assert.equal(resolveDeviceSettings(first, {ollamaEnabled:true}).ollamaEnabled, false);
   assert.equal(resolveDeviceSettings(second, first).ollamaUrl, legacy.ollamaUrl);
   assert.match(main, /loadLatest: async \(\) => this.app.loadLocalStorage\(DEVICE_SETTINGS_KEY\)/);
+});
+
+
+test("ordinary primary and backup providers run in displayed order, including Apple after cloud", async () => {
+  const { default: Gateway } = await importGatewayPlugin(true);
+  const plugin = Object.create(Gateway.prototype);
+  plugin.settings = sanitizeSettings({ settingsVersion: 3, providerOrder: ["openai", "apple"], appleIntelligenceEnabled: true });
+  plugin.isControllerDevice = () => false;
+  plugin.readSecret = () => "test-secret";
+  const calls = [];
+  plugin.completeStructuredLocally = async (_request, exact) => { calls.push(exact[0]); throw new Error("provider unavailable"); };
+  plugin.completeStructuredWithTishOSAppleIntelligence = async () => { calls.push("apple"); return { provider: "apple" }; };
+  const request = { taskId: "ordered", messages: [{ role: "user", content: "test" }], schema: { type: "object" } };
+  const result = await plugin.completeStructured(request);
+  assert.equal(result.provider, "apple");
+  assert.equal(result.attempts, 2);
+  assert.deepEqual(calls, ["openai", "apple"]);
+  assert.equal(plugin.shouldUseTishOSAppleIntelligence(request), false, "durable cloud-first work must not jump to Apple");
+  plugin.settings.providerOrder = ["apple", "openai"];
+  calls.length = 0;
+  await plugin.completeStructured(request);
+  assert.deepEqual(calls, ["apple"]);
+  plugin.completeStructuredWithTishOSAppleIntelligence = async () => { throw Object.assign(new Error("pending"), { code: "TPS_AI_JOB_PENDING" }); };
+  await assert.rejects(() => plugin.completeStructured(request), { code: "TPS_AI_JOB_PENDING" });
+  assert.deepEqual(calls, ["apple"], "pending handoffs never launch a duplicate backup");
+});
+
+test("Ollama works on a user device and no backup does not call another provider", async () => {
+  const { default: Gateway } = await importGatewayPlugin();
+  const plugin = Object.create(Gateway.prototype);
+  plugin.settings = sanitizeSettings({ settingsVersion: 3, providerOrder: ["ollama"], ollamaEnabled: true });
+  plugin.isControllerDevice = () => false;
+  plugin.readSecret = () => "";
+  const calls = [];
+  plugin.completeStructuredLocally = async (_request, exact) => { calls.push(exact); return { provider: "ollama" }; };
+  plugin.completeStructuredRemotely = async () => { throw new Error("unexpected queue"); };
+  const request = { taskId: "local", messages: [{ role: "user", content: "test" }], schema: { type: "object" } };
+  assert.equal((await plugin.completeStructured(request)).provider, "ollama");
+  assert.deepEqual(calls, [["ollama"]]);
+  plugin.completeStructuredLocally = async () => { throw new Error("offline"); };
+  await assert.rejects(() => plugin.completeStructured(request), /offline/);
+  plugin.settings.providerOrder = [];
+  await assert.rejects(() => plugin.completeStructured(request), /Choose a primary/);
 });
