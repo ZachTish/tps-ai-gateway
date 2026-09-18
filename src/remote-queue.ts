@@ -26,8 +26,8 @@ export interface RemoteAiJob {
   error?: string;
 }
 
-export function remoteAiJobPath(id: string): string {
-  return `${REMOTE_AI_QUEUE_FOLDER}/${id.replace(/[^a-z0-9_-]+/gi, "-")}.md`;
+export function remoteAiJobPath(id: string, folder = REMOTE_AI_QUEUE_FOLDER): string {
+  return `${folder}/${id.replace(/[^a-z0-9_-]+/gi, "-")}.md`;
 }
 
 export function parseRemoteAiJob(value: string): RemoteAiJob | null {

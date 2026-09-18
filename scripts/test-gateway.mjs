@@ -1107,7 +1107,7 @@ test("remote queue scans only recursive Markdown children in public traversal or
     main.indexOf("private getRemoteQueueMarkdownFiles"),
     main.indexOf("private async processRemoteJob"),
   );
-  assert.match(scannerSource, /getFolderByPath\(REMOTE_AI_QUEUE_FOLDER\)/);
+  assert.match(scannerSource, /getFolderByPath\(path\)/);
   assert.match(scannerSource, /Vault\.recurseChildren/);
   assert.doesNotMatch(scannerSource, /getMarkdownFiles/);
 });
@@ -1550,4 +1550,38 @@ test("Ollama works on a user device and no backup does not call another provider
   await assert.rejects(() => plugin.completeStructured(request), /offline/);
   plugin.settings.providerOrder = [];
   await assert.rejects(() => plugin.completeStructured(request), /Choose a primary/);
+});
+
+
+test("configured AI folders create new jobs there while durable results remain resumable in old locations", async () => {
+ const {default:GatewayPlugin,tishOSAppleIntelligenceURL}=await importGatewayPlugin();
+ const plugin=Object.create(GatewayPlugin.prototype);plugin.settings=sanitizeSettings({settingsVersion:3,providerOrder:['gemini']});
+ const files=new Map(),folders=new Map();let saved;
+ plugin.app={vault:{getAbstractFileByPath:p=>files.get(p)||folders.get(p),createFolder:async p=>folders.set(p,queueFolder(p)),create:async(p,text)=>{const f=queueFile(p);f.text=text;files.set(p,f);return f;},read:async f=>f.text,getFolderByPath:p=>queueFolder(p,[...files.values()].filter(f=>f.path.startsWith(p+'/')))}};
+ plugin.saveSettings=async()=>{saved=clone(plugin.settings);};
+ await plugin.setRequestFolder('_system/TPS AI Queue');assert.deepEqual(saved.previousQueueFolders,[REMOTE_AI_QUEUE_FOLDER]);
+ const job={version:1,id:'custom-job-123',taskId:'health.describe-food.extract',requesterDeviceId:'phone',createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),status:'pending',messages:[{role:'user',content:'synthetic'}],schema:{type:'object'}};
+ const f=await plugin.createRemoteJob(job);assert.equal(f.path,'_system/TPS AI Queue/custom-job-123.md');
+ const old=queueFile(remoteAiJobPath('old-job-123'));old.text=JSON.stringify({...job,id:'old-job-123',status:'complete',durable:true,result:{data:{},provider:'gemini',model:'test',traceId:'old-job-123',attempts:1}});files.set(old.path,old);
+ const result=await plugin.completeStructuredDurably({...job,durableJobId:'old-job-123'});assert.deepEqual(result.data,{});assert.equal(files.size,2);
+ assert.deepEqual(plugin.getRemoteQueueMarkdownFiles().map(f=>f.path),[f.path,old.path]);
+ assert.equal(tishOSAppleIntelligenceURL(job.id,'_system/TPS AI Queue'),'tishos://ai-gateway?job=custom-job-123&folder=_system%2FTPS%20AI%20Queue');
+ assert.throws(()=>tishOSAppleIntelligenceURL(job.id,'../outside'));
+});
+
+test("AI folder validation and failed persistence preserve the existing route and providers",async()=>{
+ const {default:GatewayPlugin}=await importGatewayPlugin();const plugin=Object.create(GatewayPlugin.prototype);plugin.settings=sanitizeSettings({settingsVersion:3,providerOrder:['openai']});
+ plugin.app={vault:{getAbstractFileByPath:p=>p==='collision'?queueFile(p):null}};
+ const before=clone(plugin.settings);plugin.saveSettings=async()=>{throw Error('disk failure');};
+ for(const folder of ['', '/outside','../outside','.obsidian/queue','a//b','a\\b','a/../b','C:/outside','a\u007fb','食'.repeat(101),'collision'])await assert.rejects(()=>plugin.setRequestFolder(folder));
+ await assert.rejects(()=>plugin.setRequestFolder('_system/AI'),/disk failure/);assert.deepEqual(plugin.settings,before);
+ const persisted=sanitizeSettings({...before,remoteQueueFolder:'_system/AI',previousQueueFolders:[REMOTE_AI_QUEUE_FOLDER]});assert.deepEqual(resolveDeviceSettings(persisted,{}),persisted);
+});
+
+
+test("failed folder persistence retains a provider edit made while saving", async () => {
+ const {default:GatewayPlugin}=await importGatewayPlugin();const plugin=Object.create(GatewayPlugin.prototype);plugin.settings=sanitizeSettings({settingsVersion:3,providerOrder:['openai']});
+ plugin.app={vault:{getAbstractFileByPath:()=>null}};const save=deferred();plugin.saveSettings=async()=>{await save.promise;throw new Error('disk failure');};
+ const change=plugin.setRequestFolder('_system/AI');plugin.settings.openAiModel='new-model';save.resolve();
+ await assert.rejects(()=>change,/disk failure/);assert.equal(plugin.settings.remoteQueueFolder,REMOTE_AI_QUEUE_FOLDER);assert.equal(plugin.settings.openAiModel,'new-model');
 });

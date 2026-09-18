@@ -25,6 +25,9 @@ class Control {
   constructor(el) { this.selectEl = el; }
   addOption(value, label) { (this.options ||= {})[value] = label; return this; }
   setValue(value) { this.value = value; return this; }
+  setPlaceholder(value) { this.placeholder = value; return this; }
+  setButtonText(value) { this.text = value; return this; }
+  onClick(callback) { this.click = callback; return this; }
   setDisabled(value) { this.disabled = value; return this; }
   onChange(callback) { this.change = callback; return this; }
 }
@@ -35,10 +38,12 @@ export class Setting {
   addDropdown(callback) { this.control = new Control(this.controlEl.createEl('select')); callback(this.control); return this; }
   addToggle(callback) { this.control = new Control(this.controlEl.createEl('input')); callback(this.control); return this; }
   addText(callback) { this.control = new Control(this.controlEl.createEl('input')); callback(this.control); return this; }
+  addButton(callback) { this.button = new Control(this.controlEl.createEl('button')); callback(this.button); return this; }
   addComponent(callback) { this.control = callback(this.controlEl); return this; }
 }
 export class SecretComponent extends Control { constructor(app, el) { super(el); } }
 export class TFile {}
+export class TFolder {}
 export class Vault {}
 export async function requestUrl() { throw new Error('No network in UI tests'); }
 `;
@@ -123,4 +128,12 @@ test('empty provider order remains empty until an explicit primary selection', a
   ui.elements().find(el => el.tag === 'button' && el.text === 'Cloud').click();
   await Promise.resolve();
   assert.deepEqual(ui.plugin.settings.providerOrder, ['gemini']);
+});
+
+
+test('request folder editing waits for Apply and does not change providers',async()=>{
+ const ui=setup(['gemini']);let folder;
+ ui.plugin.setRequestFolder=async value=>{folder=value;};
+ const request=field(ui,'Request files folder');assert.ok(request);assert.equal(request.control.value,'_assets/TPS AI Queue');
+ request.control.change('_system/TPS AI Queue');assert.equal(folder,undefined);await request.button.click();assert.equal(folder,'_system/TPS AI Queue');assert.deepEqual(ui.plugin.settings.providerOrder,['gemini']);assert.equal(ui.saves(),0);
 });

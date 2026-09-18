@@ -2,7 +2,7 @@
 
 Structured AI requests and guarded, domain-owned capabilities for TPS plugins.
 
-Current release: [0.8.0](https://github.com/ZachTish/tps-ai-gateway/releases/tag/0.8.0) · Obsidian 1.12.0+ · Desktop and mobile.
+Current release: [0.9.0](https://github.com/ZachTish/tps-ai-gateway/releases/tag/0.9.0) · Obsidian 1.12.0+ · Desktop and mobile.
 
 ## Install with BRAT
 
@@ -12,7 +12,7 @@ Add `ZachTish/tps-ai-gateway` to BRAT. Use manual updates with `Latest`, or free
 
 One **AI configuration** page contains **Primary AI** with three choices: **Cloud** (Google AI or OpenAI), **On device** (Ollama), and **TPS routed** (TishOS Apple Intelligence). **Backup AI** sits directly below, with None or a specific provider. Only the primary and selected backup editors appear. An existing longer backup chain is preserved until explicitly replaced; its selector lets you edit each existing backup in place. Switching the primary replaces the first provider and removes duplicates from the remaining backups. Disabled Ollama and Apple routes retain editable controls and their existing enablement toggles.
 
-Provider order, enablement, endpoints/models, secret references, and diagnostics remain in the same vault-scoped device-local storage. Actual API keys stay in Obsidian SecretStorage. Opening the page never saves settings or sends a request. There are no new persisted keys, defaults, or migrations. Backup editor selection and focus are transient.
+Provider order, enablement, endpoints/models, secret references, and diagnostics remain in the same vault-scoped device-local storage. Actual API keys stay in Obsidian SecretStorage. Opening the page never saves settings or sends a request. The request-folder setting and prior queue locations are device-local too. Backup editor selection and focus are transient.
 
 Ordinary requests try providers in order, including Apple as a backup after cloud. Ollama can run directly on user-role devices as well as Controllers. Missing credentials, disabled providers, or unavailable Apple platforms are skipped. Provider-specific requests can prefer another provider; images and grounding use Google AI. A pending Apple handoff does not start a duplicate backup. Existing durable queue contracts are retained: Apple-first durable jobs remain exclusively with TishOS; cloud queue workers do not launch Apple backups, and durable Ollama work still needs an eligible Controller worker. Text without a usable local provider retains the existing synced queue fallback. Thus None removes configured provider backups; it does not disable durable queue recovery or caller-specified providers.
 
@@ -21,6 +21,18 @@ TishOS Apple Intelligence is available through the existing iPhone/iPad handoff.
 **Diagnostics** is the single intentional disclosure at the bottom. The previous Cloud providers, Device AI, and Diagnostics destinations are removed. Native mode buttons expose `aria-pressed`, conditional rerenders restore focus, and all CSS is plugin-scoped. On narrow screens settings stack, mode choices form a compact scrollable strip, fields fill the width, and navigation is not sticky. Extend this page for related configuration rather than reintroducing separate provider pages.
 
 Preserved control inventory: OpenAI secret/model, Google AI secret/model, Apple enablement, Ollama enablement/URL/model, and logging. The Validate provider chain command and all public API actions remain available. Added controls are primary mode/cloud provider, optional backup, and the transient editor selector for legacy backup chains.
+
+## Configurable request folder — 0.9.0
+
+**Request files folder · This device → Apply folder** sets the location used by queued requests, including Describe food. Use `_system/TPS AI Queue` or another non-hidden vault-relative directory. Direct provider requests still need no queue file. Configure the same folder on all participating devices and keep it included in vault sync. The default remains `_assets/TPS AI Queue`; no files move merely by installing this release.
+
+Only new jobs use the new folder. Existing jobs remain readable, processable and resumable at their original locations, with the normal completed-job retention cleanup. This avoids moving a job while another device or Apple Intelligence is responding. `remoteQueueFolder` and `previousQueueFolders` persist in the existing device-local settings envelope. Duplicate durable job identities across known locations fail rather than creating another job. Invalid paths and destination-file collisions fail before saving. Unrelated provider edits survive a failed folder save.
+
+Apple Intelligence handoffs include the actual job folder only when it differs from the legacy default. **Custom folders with Apple Intelligence require TishOS Companion 0.16.9 (140) or later.** Update the companion before changing that route's folder; the default job-only URL remains compatible with older apps. The URL contains a bounded folder and job identity, never the prompt or result. Existing vault authorization and queue validation still apply.
+
+The flat configuration page, primary/backup controls, commands, and single Diagnostics disclosure remain. The new text field and explicit Apply button appear before Diagnostics, including when AI is disabled. They use the existing keyboard and narrow-screen layout. Focused coverage checks folder validation, new job creation, old durable completion, previous-folder scans, Apple URL routing, failed saves, and explicit Apply behavior. This additive minor release keeps Obsidian 1.12.0 as its minimum.
+
+Validation on 2026-09-18: all 46 checks pass, including the new folder and concurrent-save cases; TypeScript and the production build pass. The versioned test runtime was reloaded and the actual settings page inspected. A traversal path produced a Notice without saving; a valid Inbox path was applied through the UI and created a synthetic completed queue file in that location. Keyboard Tab reached Apply folder. Original device-local settings were restored with an identical hash, and the fixture was moved directly to `_archive`. Existing primary/backup controls and the one Diagnostics disclosure remained present. No inference request was sent. The companion custom-folder route additionally passes focused native tests; its release has separate TestFlight validation and availability gates.
 
 ## 0.8.0 validation and release
 

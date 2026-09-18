@@ -1,5 +1,5 @@
-import { DEVICE_SETTINGS_KEY, resolveDeviceSettings } from "./settings";
-import { App, Notice, Platform, Plugin, PluginSettingTab, SecretComponent, Setting, TFile, Vault } from "obsidian";
+import { DEVICE_SETTINGS_KEY, resolveDeviceSettings, normalizeQueueFolder } from "./settings";
+import { App, Notice, Platform, Plugin, PluginSettingTab, SecretComponent, Setting, TFile, TFolder, Vault } from "obsidian";
 import { callProvider } from "./providers";
 import { withProviderTimeout } from "./provider-timeout";
 import { assertSchema } from "./schema";
@@ -48,10 +48,10 @@ export default class TpsAiGatewayPlugin extends Plugin {
     this.addSettingTab(new AiGatewaySettingTab(this.app, this));
     this.addCommand({ id: "validate-provider-chain", name: "Validate provider chain", callback: () => void this.validateProviderChain() });
     this.registerEvent(this.app.vault.on("create", (file) => {
-      if (file.path.startsWith(`${REMOTE_AI_QUEUE_FOLDER}/`)) this.scheduleRemoteQueueScan("file-created");
+      if (this.getQueueFolders().some(folder => file.path.startsWith(`${folder}/`))) this.scheduleRemoteQueueScan("file-created");
     }));
     this.registerEvent(this.app.vault.on("modify", (file) => {
-      if (file.path.startsWith(`${REMOTE_AI_QUEUE_FOLDER}/`)) this.scheduleRemoteQueueScan("file-modified");
+      if (this.getQueueFolders().some(folder => file.path.startsWith(`${folder}/`))) this.scheduleRemoteQueueScan("file-modified");
     }));
     this.registerInterval(window.setInterval(() => this.scheduleRemoteQueueScan("interval"), 30_000));
     this.app.workspace.onLayoutReady(() => this.scheduleRemoteQueueScan("startup"));
@@ -146,7 +146,7 @@ export default class TpsAiGatewayPlugin extends Plugin {
       metadata: request.metadata,
     };
     const file = await this.createRemoteJob(job);
-    const target = tishOSAppleIntelligenceURL(jobId);
+    const target = tishOSAppleIntelligenceURL(jobId, file.path.slice(0, file.path.lastIndexOf("/")));
     logger.flow("AppleIntelligence", "handoff", {
       jobId,
       taskId: request.taskId,
@@ -235,7 +235,8 @@ export default class TpsAiGatewayPlugin extends Plugin {
 
   private async completeStructuredDurably<T>(request: StructuredRequest): Promise<StructuredResult<T>> {
     const jobId = request.durableJobId!;
-    const path = remoteAiJobPath(jobId);
+    const existingPath = this.findRemoteJobPath(jobId);
+    const path = existingPath || remoteAiJobPath(jobId, this.settings?.remoteQueueFolder);
     const usesTishOSAppleIntelligence = this.shouldUseTishOSAppleIntelligence(request);
     const existing = this.app.vault.getAbstractFileByPath(path);
     if (existing instanceof TFile) {
@@ -251,7 +252,7 @@ export default class TpsAiGatewayPlugin extends Plugin {
         && Platform.isIosApp
         && this.settings.appleIntelligenceEnabled
         && remoteAiJobIsClaimable(job)) {
-        window.open(tishOSAppleIntelligenceURL(job.id), "_self");
+        window.open(tishOSAppleIntelligenceURL(job.id, path.slice(0, path.lastIndexOf("/"))), "_self");
         return this.waitForRemoteJob<T>(path, request.schema);
       }
       if (remoteAiJobIsClaimable(job) && this.canProcessRemoteJob(job)) {
@@ -282,7 +283,7 @@ export default class TpsAiGatewayPlugin extends Plugin {
     const file = await this.createRemoteJob(job);
     logger.flow("RemoteQueue", "durable-submitted", { jobId, taskId: request.taskId, path: file.path });
     if (usesTishOSAppleIntelligence) {
-      window.open(tishOSAppleIntelligenceURL(jobId), "_self");
+      window.open(tishOSAppleIntelligenceURL(jobId, file.path.slice(0, file.path.lastIndexOf("/"))), "_self");
       return this.waitForRemoteJob<T>(path, request.schema);
     }
     if (this.canProcessRemoteJob(job)) {
@@ -296,8 +297,9 @@ export default class TpsAiGatewayPlugin extends Plugin {
   }
 
   private async createRemoteJob(job: RemoteAiJob): Promise<TFile> {
-    await this.ensureRemoteQueueFolder();
-    const path = remoteAiJobPath(job.id);
+    const folder = this.settings?.remoteQueueFolder || REMOTE_AI_QUEUE_FOLDER;
+    await this.ensureRemoteQueueFolder(folder);
+    const path = remoteAiJobPath(job.id, folder);
     const existing = this.app.vault.getAbstractFileByPath(path);
     if (existing instanceof TFile) throw new Error("AI queue job id already exists.");
     return this.app.vault.create(path, JSON.stringify(job, null, 2));
@@ -331,14 +333,45 @@ export default class TpsAiGatewayPlugin extends Plugin {
     }, 750);
   }
 
+  getQueueFolders(): string[] {
+    return [...new Set([this.settings?.remoteQueueFolder || REMOTE_AI_QUEUE_FOLDER, ...(this.settings?.previousQueueFolders || [])])];
+  }
+
+  async setRequestFolder(value: string): Promise<void> {
+    const folder = normalizeQueueFolder(value);
+    const current = this.settings?.remoteQueueFolder || REMOTE_AI_QUEUE_FOLDER;
+    if (folder === current) return;
+    const collision = this.app.vault.getAbstractFileByPath(folder);
+    if (collision && !(collision instanceof TFolder)) throw new Error("The AI request location is a file. Choose a folder.");
+    const previous = this.settings.previousQueueFolders;
+    this.settings.previousQueueFolders = [...new Set([...(this.settings?.previousQueueFolders || []), current])].filter(path => path !== folder);
+    this.settings.remoteQueueFolder = folder;
+    try { await this.saveSettings(); }
+    catch (error) {
+      if (this.settings.remoteQueueFolder === folder) {
+        this.settings.remoteQueueFolder = current;
+        this.settings.previousQueueFolders = previous;
+      }
+      throw error;
+    }
+    logger.flow("RemoteQueue", "folder-changed", { previousLocations: this.settings.previousQueueFolders.length });
+  }
+
+  private findRemoteJobPath(id: string): string | undefined {
+    const matches = this.getQueueFolders().map(folder => remoteAiJobPath(id, folder))
+      .filter(path => this.app.vault.getAbstractFileByPath(path) instanceof TFile);
+    if (matches.length > 1) throw new Error("This AI request exists in more than one queue folder. Resolve the duplicate before resuming.");
+    return matches[0];
+  }
+
   private getRemoteQueueMarkdownFiles(): TFile[] {
-    const folder = this.app.vault.getFolderByPath(REMOTE_AI_QUEUE_FOLDER);
-    if (!folder) return [];
-    const files: TFile[] = [];
-    Vault.recurseChildren(folder, (child) => {
-      if (child instanceof TFile && child.extension === "md") files.push(child);
-    });
-    return files;
+    const files = new Map<string, TFile>();
+    for (const path of this.getQueueFolders()) {
+      const folder = this.app.vault.getFolderByPath(path);
+      if (!folder) continue;
+      Vault.recurseChildren(folder, file => { if (file instanceof TFile && file.extension === "md") files.set(file.path, file); });
+    }
+    return [...files.values()];
   }
 
   private async scanRemoteQueue(reason: string): Promise<void> {
@@ -479,9 +512,9 @@ export default class TpsAiGatewayPlugin extends Plugin {
     return created;
   }
 
-  private async ensureRemoteQueueFolder(): Promise<void> {
+  private async ensureRemoteQueueFolder(folder = this.settings?.remoteQueueFolder || REMOTE_AI_QUEUE_FOLDER): Promise<void> {
     let path = "";
-    for (const segment of REMOTE_AI_QUEUE_FOLDER.split("/")) {
+    for (const segment of folder.split("/")) {
       path = path ? `${path}/${segment}` : segment;
       if (!this.app.vault.getAbstractFileByPath(path)) await this.app.vault.createFolder(path);
     }
@@ -673,6 +706,16 @@ export class AiGatewaySettingTab extends PluginSettingTab {
       this.renderProvider(containerEl.createDiv({ cls: "tps-ai-settings-provider" }), this.backupEditor);
     }
     containerEl.createEl("p", { cls: "tps-ai-settings-note", text: "Backups apply to ordinary requests. Durable jobs keep their TishOS or synced-queue route. Provider-specific requests may require a different provider." });
+    let queueFolder = this.plugin.settings.remoteQueueFolder || REMOTE_AI_QUEUE_FOLDER;
+    new Setting(containerEl).setName("Request files folder · This device")
+      .setDesc("Use the same folder on every AI device. Existing requests finish in their original folder.")
+      .addText(text => text.setValue(queueFolder).setPlaceholder("_system/TPS AI Queue").onChange(value => { queueFolder = value; }))
+      .addButton(button => button.setButtonText("Apply folder").onClick(async () => {
+        button.setDisabled(true);
+        try { await this.plugin.setRequestFolder(queueFolder); new Notice("AI request folder updated."); }
+        catch (error) { new Notice(String(error)); }
+        finally { button.setDisabled(false); }
+      }));
     const diagnostics = containerEl.createEl("details", { cls: "tps-ai-settings-diagnostics" });
     diagnostics.createEl("summary", { text: "Diagnostics" });
     new Setting(diagnostics).setName("Enable logging · This device").setDesc("Log routing without prompts, responses, metadata values, or secrets.")
@@ -734,9 +777,10 @@ function secretReferenceSetting(container: HTMLElement, plugin: TpsAiGatewayPlug
     }));
 }
 function makeTraceId(taskId: string): string { return `${taskId.replace(/[^a-z0-9_-]+/gi, "-").slice(0, 40)}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`; }
-export function tishOSAppleIntelligenceURL(jobId: string): string {
+export function tishOSAppleIntelligenceURL(jobId: string, folder = REMOTE_AI_QUEUE_FOLDER): string {
+  folder = normalizeQueueFolder(folder);
   if (!DURABLE_JOB_ID_PATTERN.test(jobId)) throw new Error("AI gateway job id is invalid.");
-  return `tishos://ai-gateway?job=${encodeURIComponent(jobId)}`;
+  return `tishos://ai-gateway?job=${encodeURIComponent(jobId)}${folder === REMOTE_AI_QUEUE_FOLDER ? "" : `&folder=${encodeURIComponent(folder)}`}`;
 }
 function stableDeviceDelay(deviceId: string, rangeMs: number): number {
   let hash = 2166136261;

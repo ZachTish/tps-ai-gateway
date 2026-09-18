@@ -12,6 +12,8 @@ export interface AiGatewaySettings {
   geminiApiKeySecret: string;
   geminiModel: string;
   enableLogging: boolean;
+  remoteQueueFolder: string;
+  previousQueueFolders: string[];
 }
 
 export interface AiProviderCredentials {

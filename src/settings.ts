@@ -15,6 +15,8 @@ export const DEFAULT_SETTINGS: AiGatewaySettings = {
   geminiApiKeySecret: GEMINI_API_KEY_SECRET,
   geminiModel: "gemma-4-26b-a4b-it",
   enableLogging: false,
+  remoteQueueFolder: "_assets/TPS AI Queue",
+  previousQueueFolders: [],
 };
 
 export interface LegacyApiKeyMigration {
@@ -54,6 +56,14 @@ const cloneSettings = (settings: AiGatewaySettings): AiGatewaySettings => JSON.p
 
 export const asSettingsRecord = (value: unknown): Record<string, unknown> => ({ ...record(value) });
 
+export function normalizeQueueFolder(value: unknown): string {
+  if (typeof value !== "string") throw new Error("Enter a vault-relative AI request folder.");
+  const folder = value.trim();
+  if (!folder || new TextEncoder().encode(folder).length > 300 || folder.split("/").some(part => !part || part.startsWith(".") || part !== part.trim() || /[\\:*?"<>|\p{Cc}]/u.test(part) || /[. ]$/.test(part)))
+    throw new Error("Use a vault-relative folder without hidden folders, empty segments, or traversal.");
+  return folder;
+}
+
 export function sanitizeSettings(value: unknown): AiGatewaySettings {
   const raw = record(value);
   const storedVersion = Number(raw.settingsVersion);
@@ -77,6 +87,8 @@ export function sanitizeSettings(value: unknown): AiGatewaySettings {
     openAiModel: string(raw.openAiModel, DEFAULT_SETTINGS.openAiModel),
     geminiApiKeySecret: string(raw.geminiApiKeySecret, DEFAULT_SETTINGS.geminiApiKeySecret),
     geminiModel: string(raw.geminiModel, DEFAULT_SETTINGS.geminiModel),
+    remoteQueueFolder: normalizeQueueFolder(raw.remoteQueueFolder ?? DEFAULT_SETTINGS.remoteQueueFolder),
+    previousQueueFolders: Array.isArray(raw.previousQueueFolders) ? [...new Set(raw.previousQueueFolders.map(normalizeQueueFolder))] : [],
     enableLogging: typeof raw.enableLogging === "boolean" ? raw.enableLogging : false,
   };
 }
