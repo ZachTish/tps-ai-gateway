@@ -35,6 +35,11 @@ export default class TpsAiGatewayPlugin extends Plugin {
   async onload(): Promise<void> {
     await this.loadSettings();
     this.api = {
+      connectionSettings: { version: 1, render: (parent: HTMLElement) => {
+        const panel = new AiConnectionSettings(this.app, this, parent);
+        panel.display();
+        return () => panel.dispose();
+      } },
       features: { googleSearchGrounding: true, appleIntelligence: true },
       completeStructured: <T>(request: StructuredRequest) => this.completeStructured<T>(request),
       choose: <T>(request: Omit<StructuredRequest, "schema"> & { options: DecisionOption<T>[] }) => this.choose<T>(request),
@@ -631,10 +636,26 @@ function remoteJobMatchesRequest(job: RemoteAiJob, request: StructuredRequest): 
 }
 
 export class AiGatewaySettingTab extends PluginSettingTab {
+  constructor(app: App, private plugin: TpsAiGatewayPlugin) { super(app, plugin); }
+  display(): void {
+    this.containerEl.empty();
+    this.containerEl.createEl("h2", { text: "TPS AI Gateway" });
+    new Setting(this.containerEl).setName("AI connections")
+      .setDesc("Providers, models, backups, and request routing are managed in TPS Controller.")
+      .addButton(button => button.setButtonText("Open connections").onClick(() => {
+        const controller = (this.app as any).plugins?.plugins?.["tps-controller"]?.api;
+        if (typeof controller?.openConnectionSettings === "function") controller.openConnectionSettings("ai");
+        else new Notice("Enable or update TPS Controller to 2.6.0+ to manage AI connections.");
+      }));
+  }
+}
+
+export class AiConnectionSettings {
   private backupEditor: AiProviderId | null = null;
 
-  constructor(app: App, private plugin: TpsAiGatewayPlugin) { super(app, plugin); }
-
+  private disposed = false;
+  constructor(private app: App, private plugin: TpsAiGatewayPlugin, readonly containerEl: HTMLElement) {}
+  dispose(): void { this.disposed = true; }
   display(): void { this.renderSettings(); }
 
   private async selectPrimary(provider: AiProviderId): Promise<void> {
@@ -644,6 +665,7 @@ export class AiGatewaySettingTab extends PluginSettingTab {
   }
 
   private renderSettings(focus?: string): void {
+    if (this.disposed) return;
     const { containerEl } = this;
     const scrollTop = containerEl.scrollTop;
     containerEl.empty();

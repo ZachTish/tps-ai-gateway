@@ -1,8 +1,17 @@
 # TPS AI Gateway
 
+## 0.10.0 — AI setup in Controller
+
+Open **Controller → Connections → AI** to configure primary/backup providers, models, URLs, credentials, enablement, request folder, and diagnostics. AI Gateway's settings page is now a single direct **Open connections** handoff. The existing AI editor is mounted inside Controller, without duplicate controls or a new settings store. It requires Controller 2.6.0+ for configuration; already configured AI requests still execute without it.
+
+The connection editor API is `api.connectionSettings = { version: 1, render(parent): dispose }`. Controller mounts one editor at a time and disposes it on navigation/hide. Provider-specific editors retain the existing save paths, runtime adapters, commands, and device state. No keys, tokens, pairing authority, queued requests, connection IDs, sync cursors, or note mappings are copied or reset. No connection or provider test runs merely from opening settings. Missing/outdated plugins produce an upgrade/enable message instead of a duplicate configuration surface.
+
+The provider editor retains Cloud, On device, and TPS routed selection, all existing backup providers, conditional controls, focus restoration and the one Diagnostics disclosure. Controller supplies the mobile wrapping layout. The Validate provider chain command remains explicit and available. Existing request/capability APIs and device-local persistence are unchanged. This additive UI/API consolidation is a minor release; minimum Obsidian remains 1.12.0. See [release validation](release-notes/0.10.0.md) for tests, final build, test deployment/reload/UI checks, limitations and hashes.
+
+
 Structured AI requests and guarded, domain-owned capabilities for TPS plugins.
 
-Current release: [0.9.0](https://github.com/ZachTish/tps-ai-gateway/releases/tag/0.9.0) · Obsidian 1.12.0+ · Desktop and mobile.
+Current release: [0.10.0](https://github.com/ZachTish/tps-ai-gateway/releases/tag/0.10.0) · Obsidian 1.12.0+ · Desktop and mobile.
 
 ## Install with BRAT
 
@@ -10,7 +19,7 @@ Add `ZachTish/tps-ai-gateway` to BRAT. Use manual updates with `Latest`, or free
 
 ## Configure this device
 
-One **AI configuration** page contains **Primary AI** with three choices: **Cloud** (Google AI or OpenAI), **On device** (Ollama), and **TPS routed** (TishOS Apple Intelligence). **Backup AI** sits directly below, with None or a specific provider. Only the primary and selected backup editors appear. An existing longer backup chain is preserved until explicitly replaced; its selector lets you edit each existing backup in place. Switching the primary replaces the first provider and removes duplicates from the remaining backups. Disabled Ollama and Apple routes retain editable controls and their existing enablement toggles.
+**Controller → Connections → AI** contains **Primary AI** with three choices: **Cloud** (Google AI or OpenAI), **On device** (Ollama), and **TPS routed** (TishOS Apple Intelligence). **Backup AI** sits directly below, with None or a specific provider. Only the primary and selected backup editors appear. An existing longer backup chain is preserved until explicitly replaced; its selector lets you edit each existing backup in place. Switching the primary replaces the first provider and removes duplicates from the remaining backups. Disabled Ollama and Apple routes retain editable controls and their existing enablement toggles.
 
 Provider order, enablement, endpoints/models, secret references, and diagnostics remain in the same vault-scoped device-local storage. Actual API keys stay in Obsidian SecretStorage. Opening the page never saves settings or sends a request. The request-folder setting and prior queue locations are device-local too. Backup editor selection and focus are transient.
 

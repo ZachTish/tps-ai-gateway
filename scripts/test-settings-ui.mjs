@@ -54,11 +54,11 @@ const compiled = await build({
     build.onLoad({ filter: /.*/, namespace: 'stub' }, () => ({ contents: stub, loader: 'js' }));
   } }],
 });
-const { AiGatewaySettingTab } = await import(`data:text/javascript;base64,${Buffer.from(compiled.outputFiles[0].text).toString('base64')}`);
+const { AiGatewaySettingTab, AiConnectionSettings } = await import(`data:text/javascript;base64,${Buffer.from(compiled.outputFiles[0].text).toString('base64')}`);
 function setup(order = ['apple', 'ollama', 'openai', 'gemini']) {
   let saves = 0;
   const plugin = { settings: { providerOrder: order, appleIntelligenceEnabled: false, ollamaEnabled: false, openAiModel: 'existing', geminiModel: 'existing', enableLogging: false }, saveSettings: async () => { saves++; } };
-  const tab = new AiGatewaySettingTab({}, plugin);
+  const tab = new AiConnectionSettings({}, plugin, new AiGatewaySettingTab({}).containerEl);
   tab.display();
   return { plugin, tab, saves: () => saves, fields: () => tab.containerEl.all().filter(el => el.setting).map(el => el.setting), elements: () => tab.containerEl.all() };
 }
@@ -136,4 +136,23 @@ test('request folder editing waits for Apply and does not change providers',asyn
  ui.plugin.setRequestFolder=async value=>{folder=value;};
  const request=field(ui,'Request files folder');assert.ok(request);assert.equal(request.control.value,'_assets/TPS AI Queue');
  request.control.change('_system/TPS AI Queue');assert.equal(folder,undefined);await request.button.click();assert.equal(folder,'_system/TPS AI Queue');assert.deepEqual(ui.plugin.settings.providerOrder,['gemini']);assert.equal(ui.saves(),0);
+});
+
+
+test('plugin settings only hand off and never expose duplicate provider editors', () => {
+  const calls = [];
+  const tab = new AiGatewaySettingTab({plugins:{plugins:{'tps-controller':{api:{openConnectionSettings: id => calls.push(id)}}}}});
+  tab.display();
+  const fields = tab.containerEl.all().filter(el => el.setting).map(el => el.setting);
+  assert.deepEqual(fields.map(field => field.name), ['AI connections']);
+  fields[0].button.click(); assert.deepEqual(calls, ['ai']);
+});
+test('disposed editor cannot re-render after a delayed save finishes', async () => {
+  const ui = setup(['openai']);
+  let finish;
+  ui.plugin.saveSettings = () => new Promise(resolve => {finish = resolve;});
+  ui.elements().find(el => el.text === 'On device').click();
+  const children = ui.tab.containerEl.children;
+  ui.tab.dispose(); finish(); await Promise.resolve();
+  assert.equal(ui.tab.containerEl.children, children);
 });

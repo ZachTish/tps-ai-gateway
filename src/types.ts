@@ -98,6 +98,7 @@ export interface CapabilityProposal<TInput = unknown> {
 }
 
 export interface TpsAiGatewayApi {
+  connectionSettings: { version: 1; render(parent: HTMLElement): () => void };
   readonly features: {
     readonly googleSearchGrounding: true;
     readonly appleIntelligence: true;
