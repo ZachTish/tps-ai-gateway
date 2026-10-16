@@ -1,5 +1,23 @@
 # TPS AI Gateway
 
+## 1.0.0 — Explicit direct AI requests
+
+The synced Markdown queue is removed. Startup registers no queue listeners or timers and performs no queue reads, claims, writes, notifications, or Apple URL handoffs. Existing files, credentials and local state remain untouched. Direct user-requested OpenAI, Gemini and Ollama requests, structured schemas and guarded capabilities remain available.
+
+This is a **major release**: `durableJobId` requests fail explicitly before any provider call; Apple Intelligence reports unavailable (`features.appleIntelligence: false`) and does not silently fall back. Missing direct credentials no longer create queued jobs. Configure a direct provider in **Controller → Connections → AI**. The request-folder control and Apple enable toggle are gone. SecretStorage references remain valid; historical plaintext credentials are preserved but are no longer automatically adopted. Explicit settings saves preserve inert legacy and unknown fields. No migration replays pending jobs.
+
+The settings hub remains a native Open connections handoff. Controller renders one provider editor, with primary/backup selectors and one Diagnostics disclosure. Opening it sends no requests and saves nothing. Mobile layout still stacks native controls; physical iPhone acceptance remains unverified.
+
+Validation: 37 passing tests cover direct transport shapes (mocked, no external requests), schema/capability safety, settings concurrency, zero queue registrations, 20 settings loads without credential/storage writes, explicit retirement errors, and unload during a pending settings read. Runtime source drops by 553 lines (18 added, 571 deleted). The initialization regression reproduced two late registrations before the lifecycle guard. Final versioned tests, separate build, test deployment and installed checks are recorded in [release notes](release-notes/1.0.0.md).
+
+The integrated foreground warm-reload comparison measured current versus cleaned medians of 6066.2 vs 6084.7 ms (0.3% difference), and 20-note navigation medians of 897.2 vs 838.9 ms. These are combined test-vault samples, not AI-specific or production cold-start claims. Idle, typing, Sync-burst, settings and Finance checks observed zero TPS maintenance writes. See the cleanup acceptance evidence for scope and remaining platform checks.
+
+Rollback can reactivate old queue workers and replay preserved jobs. Stop owners before downgrading. This release is for a BRAT pull after test-vault validation; it does not install production or configure TishOS. Health's cleanup removes its durable-job callers; old callers receive the explicit retirement error until updated.
+
+## Historical behavior through 0.10.0
+
+The sections below describe prior releases, including retired queue behavior. The 1.0.0 contract above supersedes them.
+
 ## 0.10.0 — AI setup in Controller
 
 Open **Controller → Connections → AI** to configure primary/backup providers, models, URLs, credentials, enablement, request folder, and diagnostics. AI Gateway's settings page is now a single direct **Open connections** handoff. The existing AI editor is mounted inside Controller, without duplicate controls or a new settings store. It requires Controller 2.6.0+ for configuration; already configured AI requests still execute without it.
@@ -11,7 +29,7 @@ The provider editor retains Cloud, On device, and TPS routed selection, all exis
 
 Structured AI requests and guarded, domain-owned capabilities for TPS plugins.
 
-Current release: [0.10.0](https://github.com/ZachTish/tps-ai-gateway/releases/tag/0.10.0) · Obsidian 1.12.0+ · Desktop and mobile.
+Current release: [1.0.0](https://github.com/ZachTish/tps-ai-gateway/releases/tag/1.0.0) · Obsidian 1.12.0+ · Desktop and mobile.
 
 ## Install with BRAT
 
@@ -81,3 +99,7 @@ Dependencies stay in the vault's `.plugin-dev-cache.nosync` through a relative `
 Documentation-only maintenance does not create a new plugin version. Published release tags and assets are preserved. Do not rely on legacy version/release scripts without reviewing their current behavior. Production updates remain the user's BRAT handoff.
 
 For prior feature details and release-specific evidence, see [REFERENCE.md](REFERENCE.md) and [GitHub releases](https://github.com/ZachTish/tps-ai-gateway/releases). The September 16 cleanup changes documentation and repository metadata, not shipped behavior.
+
+### Unload during initialization
+
+The gateway stops initialization if unloaded while its settings read is pending. A focused regression reproduced two late registrations and API publication after unload; the guard prevents both without registering a replacement listener or timer. Provider tests use mocked transports and make no external requests.

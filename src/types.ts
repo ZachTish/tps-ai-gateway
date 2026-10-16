@@ -12,8 +12,6 @@ export interface AiGatewaySettings {
   geminiApiKeySecret: string;
   geminiModel: string;
   enableLogging: boolean;
-  remoteQueueFolder: string;
-  previousQueueFolders: string[];
 }
 
 export interface AiProviderCredentials {
@@ -101,7 +99,7 @@ export interface TpsAiGatewayApi {
   connectionSettings: { version: 1; render(parent: HTMLElement): () => void };
   readonly features: {
     readonly googleSearchGrounding: true;
-    readonly appleIntelligence: true;
+    readonly appleIntelligence: false;
   };
   completeStructured<T>(request: StructuredRequest): Promise<StructuredResult<T>>;
   choose<T>(request: Omit<StructuredRequest, "schema"> & { options: DecisionOption<T>[] }): Promise<DecisionResult<T>>;

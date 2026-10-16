@@ -75,7 +75,7 @@ test('opening settings preserves existing routes and exposes every legacy backup
     assert.ok(ui.elements().find(el => el.attrs['data-ai-focus'] === 'backup-editor').focused);
   }
   assert.equal(ui.saves(), 0);
-  assert.ok(field(ui, 'Use TishOS Apple Intelligence'));
+  assert.ok(field(ui, 'Apple Intelligence unavailable'));
   assert.equal(ui.elements().filter(el => el.tag === 'details').length, 1);
   assert.ok(field(ui, 'Enable logging'));
 });
@@ -84,7 +84,7 @@ test('all modes show only their provider controls and keep disabled provider con
   const ui = setup(['openai']);
   assert.ok(field(ui, 'OpenAI API key'));
   assert.equal(field(ui, 'Ollama URL'), undefined);
-  for (const [label, provider, visible] of [['On device', 'ollama', 'Ollama URL'], ['TPS routed', 'apple', 'Use TishOS Apple Intelligence'], ['Cloud', 'gemini', 'Google AI model']]) {
+  for (const [label, provider, visible] of [['On device', 'ollama', 'Ollama URL'], ['TPS routed (unavailable)', 'apple', 'Apple Intelligence unavailable'], ['Cloud', 'gemini', 'Google AI model']]) {
     ui.elements().find(el => el.tag === 'button' && el.text === label).click();
     await Promise.resolve();
     assert.deepEqual(ui.plugin.settings.providerOrder, [provider]);
@@ -131,11 +131,13 @@ test('empty provider order remains empty until an explicit primary selection', a
 });
 
 
-test('request folder editing waits for Apply and does not change providers',async()=>{
- const ui=setup(['gemini']);let folder;
- ui.plugin.setRequestFolder=async value=>{folder=value;};
- const request=field(ui,'Request files folder');assert.ok(request);assert.equal(request.control.value,'_assets/TPS AI Queue');
- request.control.change('_system/TPS AI Queue');assert.equal(folder,undefined);await request.button.click();assert.equal(folder,'_system/TPS AI Queue');assert.deepEqual(ui.plugin.settings.providerOrder,['gemini']);assert.equal(ui.saves(),0);
+test('retired request folder and Apple toggle are absent without changing saved settings',()=>{
+ const ui=setup(['apple']);
+ assert.equal(field(ui,'Request files folder'),undefined);
+ assert.equal(field(ui,'Use TishOS Apple Intelligence'),undefined);
+ assert.ok(field(ui,'Apple Intelligence unavailable'));
+ assert.deepEqual(ui.plugin.settings.providerOrder,['apple']);
+ assert.equal(ui.saves(),0);
 });
 
 

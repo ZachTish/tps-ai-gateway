@@ -11,7 +11,6 @@ const loggerSource = readFileSync(new URL("../src/logger.ts", import.meta.url), 
 const timeoutSource = readFileSync(new URL("../src/provider-timeout.ts", import.meta.url), "utf8");
 const settingsSource = readFileSync(new URL("../src/settings.ts", import.meta.url), "utf8");
 const schemaSource = readFileSync(new URL("../src/schema.ts", import.meta.url), "utf8");
-const remoteQueueSource = readFileSync(new URL("../src/remote-queue.ts", import.meta.url), "utf8");
 const stylesSource = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
 const manifest = JSON.parse(readFileSync(new URL("../manifest.json", import.meta.url), "utf8"));
 const schemaModule = transformSync(schemaSource, { loader: "ts", format: "esm", target: "es2020" }).code;
@@ -22,7 +21,6 @@ const {
   AiGatewaySettingsSaveCoordinator,
   changedSettingsKeys,
   mergeChangedSettings,
-  planLegacyApiKeyMigration,
   reconcilePersistedSettings,
   sanitizeSettings,
 } = await import(`data:text/javascript;base64,${Buffer.from(settingsModule).toString("base64")}`);
@@ -30,8 +28,6 @@ const loggerModule = transformSync(loggerSource, { loader: "ts", format: "esm", 
 const { errorSummary, metadataSummary } = await import(`data:text/javascript;base64,${Buffer.from(loggerModule).toString("base64")}`);
 const timeoutModule = transformSync(timeoutSource, { loader: "ts", format: "esm", target: "es2020" }).code;
 const { withProviderTimeout } = await import(`data:text/javascript;base64,${Buffer.from(timeoutModule).toString("base64")}`);
-const remoteQueueModule = transformSync(remoteQueueSource, { loader: "ts", format: "esm", target: "es2020" }).code;
-const { parseRemoteAiJob, remoteAiJobIsClaimable, remoteAiJobIsExpired, remoteAiJobPath, REMOTE_AI_QUEUE_FOLDER } = await import(`data:text/javascript;base64,${Buffer.from(remoteQueueModule).toString("base64")}`);
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const deferred = () => {
@@ -39,21 +35,6 @@ const deferred = () => {
   const promise = new Promise((complete) => { resolve = complete; });
   return { promise, resolve };
 };
-const queueFile = (path) => ({
-  kind: "file",
-  path,
-  extension: path.includes(".") ? path.slice(path.lastIndexOf(".") + 1) : "",
-});
-const queueFolder = (path, children = []) => ({ kind: "folder", path, children });
-const queueVault = (getChildren, methods = {}) => ({
-  getFolderByPath: (path) => path === REMOTE_AI_QUEUE_FOLDER
-    ? queueFolder(REMOTE_AI_QUEUE_FOLDER, getChildren())
-    : null,
-  getMarkdownFiles: () => {
-    throw new Error("Remote queue scans must not enumerate all vault Markdown files.");
-  },
-  ...methods,
-});
 
 async function importGatewayPlugin(isIosApp = false) {
   const bundle = await esbuildBuild({
@@ -157,7 +138,7 @@ test("gateway owns provider transport and fallback", () => {
   assert.match(providers, /credentials\.geminiApiKey/);
   assert.match(providers, /"x-goog-api-key": apiKey/);
   assert.doesNotMatch(providers, /generateContent\?key=/);
-  assert.match(main, /features: \{ googleSearchGrounding: true, appleIntelligence: true \}/);
+  assert.match(main, /features: \{ googleSearchGrounding: true, appleIntelligence: false \}/);
 });
 
 test("all providers preserve system and conversational message request shapes", async () => {
@@ -467,31 +448,6 @@ test("gateway diagnostics never log caller-controlled metadata values", () => {
   assert.doesNotMatch(requestStartLog, /metadata: request\.metadata/);
 });
 
-test("gateway migrates plaintext API keys into SecretStorage and purges them from settings", () => {
-  const legacy = {
-    settingsVersion: 1,
-    openAiApiKey: " legacy-openai ",
-    geminiApiKey: " legacy-gemini ",
-  };
-  const settings = sanitizeSettings(legacy);
-  assert.equal(settings.settingsVersion, 3);
-  assert.equal("openAiApiKey" in settings, false);
-  assert.equal("geminiApiKey" in settings, false);
-
-  const emptyPlan = planLegacyApiKeyMigration(legacy, settings, () => null);
-  assert.deepEqual(emptyPlan.writes.map(({ provider, secretName }) => ({ provider, secretName })), [
-    { provider: "openai", secretName: "tps-ai-gateway-openai-api-key" },
-    { provider: "gemini", secretName: "tps-ai-gateway-gemini-api-key" },
-  ]);
-  assert.equal(emptyPlan.shouldPersist, true);
-
-  const existingPlan = planLegacyApiKeyMigration(legacy, settings, () => "already-configured");
-  assert.equal(existingPlan.writes.length, 0);
-  assert.match(main, /secretStorage\.setSecret\(write\.secretName, write\.value\)/);
-  assert.match(main, /new SecretComponent/);
-  assert.equal(manifest.minAppVersion, "1.12.0");
-});
-
 test("gateway preserves explicit provider choices and empty text settings", () => {
   const settings = sanitizeSettings({
     settingsVersion: 2,
@@ -501,7 +457,7 @@ test("gateway preserves explicit provider choices and empty text settings", () =
     openAiModel: "",
     geminiModel: "",
   });
-  assert.deepEqual(settings.providerOrder, ["apple", "openai"]);
+  assert.deepEqual(settings.providerOrder, ["openai"]);
   assert.equal(settings.ollamaUrl, "");
   assert.equal(settings.ollamaModel, "");
   assert.equal(settings.openAiModel, "");
@@ -527,10 +483,6 @@ test("gateway never downgrades future settings and merges only local changes", (
   assert.equal(merged.geminiModel, "future-gemini");
   assert.deepEqual(merged.futureProvider, { model: "future-model" });
   assert.equal(sanitizeSettings(future).settingsVersion, 4);
-  assert.deepEqual(planLegacyApiKeyMigration({ ...future, openAiApiKey: "do-not-migrate" }, sanitizeSettings(future), () => null), {
-    writes: [],
-    shouldPersist: false,
-  });
   assert.match(main, /new AiGatewaySettingsSaveCoordinator/);
 });
 
@@ -710,782 +662,22 @@ test("gateway separates proposals from guarded execution", () => {
   assert.match(main, /assertSchema\(proposal\.input, capability\.inputSchema\)/);
 });
 
-test("gateway uses device-local cloud credentials and reserves durable text work for the synced queue", async () => {
-  assert.match(main, /deviceLocalCloudProviders\(\{ \.\.\.request, preferredProviders: \[provider\] \}\)/);
-  assert.match(main, /Image requests require Gemini to be configured in TPS AI Gateway on this device/);
-  assert.match(main, /controller\?\.api\?\.isController\?\.\(\) === true/);
-  assert.match(main, /this\.app\.vault\.create\(path, JSON\.stringify\(job, null, 2\)\)/);
-  assert.match(main, /remoteAiJobIsClaimable\(job\)/);
-  assert.match(main, /this\.completeStructuredLocally\(request, this\.isControllerDevice\(\) \? undefined : localProviders\)/);
-  assert.match(main, /notifier\?\.sendNotification/);
-  assert.match(main, /job\.metadata\?\.notifyOnCompletion === false/);
-  assert.match(main, /Sent to the synced AI queue\. Another AI-enabled device can finish it\./);
-
-  const { default: GatewayPlugin, validateInlineMedia } = await importGatewayPlugin();
-  const plugin = Object.create(GatewayPlugin.prototype);
-  plugin.settings = {
-    providerOrder: ["gemini", "openai", "ollama"],
-    geminiApiKeySecret: "gemini-ref",
-    openAiApiKeySecret: "openai-ref",
-  };
-  plugin.isControllerDevice = () => false;
-  plugin.readSecret = (name) => name === "gemini-ref" ? "device-gemini-secret" : "";
-  let localCalls = 0;
-  let remoteCalls = 0;
-  let durableCalls = 0;
-  const localRequests = [];
-  plugin.completeStructuredLocally = async (request) => { localRequests.push(request); return { data: { ok: true }, provider: "gemini", model: "gemini-model", traceId: "local", attempts: 1 }; };
-  plugin.completeStructuredRemotely = async () => { remoteCalls += 1; return { data: { ok: true }, provider: "gemini", model: "remote", traceId: "remote", attempts: 1 }; };
-  plugin.completeStructuredDurably = async () => { durableCalls += 1; return { data: { ok: true }, provider: "gemini", model: "durable", traceId: "durable", attempts: 1 }; };
-  const originalLocal = plugin.completeStructuredLocally;
-  plugin.completeStructuredLocally = async (...args) => { localCalls += 1; return originalLocal(...args); };
-  const base = { taskId: "device-local", messages: [{ role: "user", content: "Return ok." }], schema: { type: "object" } };
-  assert.equal((await plugin.completeStructured(base)).traceId, "local");
-  assert.equal((await plugin.completeStructured({ ...base, preferredProviders: ["gemini"], media: [{ mimeType: "image/jpeg", data: "aGVsbG8=" }] })).traceId, "local");
-  assert.equal((await plugin.completeStructured({ ...base, preferredProviders: ["gemini"], grounding: "google-search" })).traceId, "local");
-  assert.equal(localCalls, 3);
-  assert.equal(remoteCalls, 0);
-  assert.equal((await plugin.completeStructured({ ...base, durableJobId: "describe-food-job-123" })).traceId, "durable");
-  assert.equal(durableCalls, 1);
-  await assert.rejects(() => plugin.completeStructured({ ...base, durableJobId: "short" }), /durableJobId is invalid/);
-  await assert.rejects(() => plugin.completeStructured({ ...base, durableJobId: "describe-food-image-123", media: [{ mimeType: "image/jpeg", data: "aGVsbG8=" }] }), /cannot contain images/);
-  await assert.rejects(() => plugin.completeStructured({ ...base, grounding: "google-search", media: [{ mimeType: "image/jpeg", data: "aGVsbG8=" }] }), /cannot be combined with inline images/);
-  assert.deepEqual(localRequests.map((request) => request.preferredProviders), [["gemini"], ["gemini"], ["gemini"]], "a user-role device must not stall on local Ollama when device Gemini is available");
-  assert.doesNotThrow(() => validateInlineMedia({ ...base, media: [{ mimeType: "image/webp", data: "aGVsbG8=" }] }));
-  assert.throws(() => validateInlineMedia({ ...base, media: [{ mimeType: "image/gif", data: "aGVsbG8=" }] }), /Unsupported inline image type/);
-
-  plugin.readSecret = () => "";
-  assert.equal((await plugin.completeStructured(base)).traceId, "remote");
-  await assert.rejects(() => plugin.completeStructured({ ...base, preferredProviders: ["gemini"], media: [{ mimeType: "image/jpeg", data: "aGVsbG8=" }] }), /require Gemini/);
-});
-
-test("iOS routes eligible structured requests through TishOS Apple Intelligence", async () => {
-  const { default: GatewayPlugin, tishOSAppleIntelligenceURL } = await importGatewayPlugin(true);
-  assert.equal(
-    tishOSAppleIntelligenceURL("health-job_1234"),
-    "tishos://ai-gateway?job=health-job_1234",
-  );
-  assert.throws(() => tishOSAppleIntelligenceURL("short"), /job id is invalid/);
-
-  const plugin = Object.create(GatewayPlugin.prototype);
-  plugin.settings = {
-    appleIntelligenceEnabled: true,
-    providerOrder: ["apple", "gemini"],
-  };
-  plugin.isControllerDevice = () => true;
-  let appleCalls = 0;
-  let localCalls = 0;
-  plugin.completeStructuredWithTishOSAppleIntelligence = async () => {
-    appleCalls += 1;
-    return {
-      data: { ok: true },
-      provider: "apple",
-      model: "apple-on-device",
-      traceId: "apple",
-      attempts: 1,
-    };
-  };
-  plugin.completeStructuredLocally = async () => {
-    localCalls += 1;
-    return {
-      data: { ok: true },
-      provider: "gemini",
-      model: "gemini-model",
-      traceId: "local",
-      attempts: 1,
-    };
-  };
-  const request = {
-    taskId: "ios-structured",
-    messages: [{ role: "user", content: "Return ok." }],
-    schema: { type: "object" },
-  };
-  assert.equal((await plugin.completeStructured(request)).provider, "apple");
-  assert.equal(appleCalls, 1);
-  assert.equal(localCalls, 0);
-
-  await plugin.completeStructured({
-    ...request,
-    media: [{ mimeType: "image/jpeg", data: "aGVsbG8=" }],
-  });
-  assert.equal(appleCalls, 1, "Apple handoff is text-only");
-  assert.equal(localCalls, 1);
-});
-
-test("Apple handoff writes one explicit queue target and opens only the strict TishOS route", async () => {
-  const { default: GatewayPlugin } = await importGatewayPlugin(true);
-  const plugin = Object.create(GatewayPlugin.prototype);
-  plugin.getDeviceId = () => "ios-device";
-  let submittedJob;
-  plugin.createRemoteJob = async (job) => {
-    submittedJob = job;
-    return queueFile(`${REMOTE_AI_QUEUE_FOLDER}/${job.id}.md`);
-  };
-  plugin.waitForRemoteJob = async () => ({
-    data: { ok: true },
-    provider: "apple",
-    model: "apple-on-device",
-    traceId: "apple",
-    attempts: 1,
-  });
-  const events = [];
-  plugin.app = { workspace: { trigger: (...args) => events.push(args) } };
-  plugin.manifest = { id: "tps-ai-gateway" };
-  const opened = [];
-  const previousWindow = globalThis.window;
-  globalThis.window = { open: (...args) => opened.push(args) };
-  try {
-    await plugin.completeStructuredWithTishOSAppleIntelligence({
-      taskId: "health-describe-food",
-      messages: [{ role: "user", content: "oatmeal" }],
-      schema: { type: "object" },
-      metadata: { workflow: "describe-food" },
-    });
-  } finally {
-    globalThis.window = previousWindow;
-  }
-
-  assert.equal(submittedJob.executionTarget, "tishos-apple");
-  assert.deepEqual(submittedJob.preferredProviders, ["apple"]);
-  assert.match(opened[0][0], /^tishos:\/\/ai-gateway\?job=[a-z0-9_-]{8,160}$/i);
-  assert.equal(opened[0][1], "_self");
-  assert.equal(events.length, 1);
-});
-
-test("durable iOS work preserves its id and routes exclusively through TishOS Apple Intelligence", async () => {
-  const { default: GatewayPlugin } = await importGatewayPlugin(true);
-  const plugin = Object.create(GatewayPlugin.prototype);
-  plugin.settings = {
-    appleIntelligenceEnabled: true,
-    providerOrder: ["apple", "gemini"],
-  };
-  plugin.getDeviceId = () => "ios-device";
-  plugin.app = {
-    vault: { getAbstractFileByPath: () => null },
-  };
-  let submittedJob;
-  plugin.createRemoteJob = async (job) => {
-    submittedJob = job;
-    return queueFile(`${REMOTE_AI_QUEUE_FOLDER}/${job.id}.md`);
-  };
-  plugin.waitForRemoteJob = async () => ({
-    data: { calories: 320 },
-    provider: "apple",
-    model: "apple-private-cloud",
-    traceId: "apple-durable",
-    attempts: 1,
-  });
-  const opened = [];
-  const previousWindow = globalThis.window;
-  globalThis.window = { open: (...args) => opened.push(args) };
-  try {
-    const result = await plugin.completeStructuredDurably({
-      taskId: "health-describe-food",
-      durableJobId: "health-describe-food-20260903",
-      messages: [{ role: "user", content: "oatmeal and berries" }],
-      schema: {
-        type: "object",
-        additionalProperties: false,
-        required: ["calories"],
-        properties: { calories: { type: "number" } },
-      },
-    });
-    assert.equal(result.provider, "apple");
-  } finally {
-    globalThis.window = previousWindow;
-  }
-
-  assert.equal(submittedJob.id, "health-describe-food-20260903");
-  assert.equal(submittedJob.durable, true);
-  assert.equal(submittedJob.executionTarget, "tishos-apple");
-  assert.deepEqual(submittedJob.preferredProviders, ["apple"]);
-  assert.deepEqual(opened, [[
-    "tishos://ai-gateway?job=health-describe-food-20260903",
-    "_self",
-  ]]);
-});
-
-test("any device with a matching local cloud credential can finish durable queue work", async () => {
-  const { default: GatewayPlugin } = await importGatewayPlugin();
-  const plugin = Object.create(GatewayPlugin.prototype);
-  plugin.settings = {
-    providerOrder: ["gemini", "openai", "ollama"],
-    geminiApiKeySecret: "gemini-ref",
-    openAiApiKeySecret: "openai-ref",
-  };
-  plugin.isControllerDevice = () => false;
-  plugin.readSecret = (name) => name === "gemini-ref" ? "device-gemini-secret" : "";
-  plugin.getDeviceId = () => "phone";
-  const job = {
-    durable: true,
-    requesterDeviceId: "phone",
-    createdAt: new Date().toISOString(),
-    taskId: "health.describe-food.extract",
-    messages: [{ role: "user", content: "oatmeal and berries" }],
-    schema: { type: "object" },
-    preferredProviders: ["gemini"],
-  };
-  assert.equal(plugin.canProcessRemoteQueue(), true);
-  assert.equal(plugin.canProcessRemoteJob(job), true);
-  assert.equal(
-    plugin.canProcessRemoteJob({ ...job, executionTarget: "tishos-apple" }),
-    false,
-    "Obsidian workers must leave explicit Apple jobs for TishOS",
-  );
-  assert.deepEqual(plugin.remoteJobLocalProviders(job), ["gemini"]);
-  assert.equal(plugin.canProcessRemoteJob({ ...job, requesterDeviceId: "other-device" }), false, "a non-requester waits so the submitting device can claim first");
-  assert.equal(plugin.canProcessRemoteJob({ ...job, requesterDeviceId: "other-device", createdAt: new Date(Date.now() - 60_000).toISOString() }), true, "an online Gemini device eventually recovers abandoned durable work");
-  plugin.readSecret = () => "";
-  assert.equal(plugin.canProcessRemoteQueue(), false);
-  assert.equal(plugin.canProcessRemoteJob(job), false);
-  assert.match(main, /Saved this AI request\. Another online device can finish it if needed\./);
-  assert.match(main, /TPS_AI_JOB_PENDING/);
-  assert.match(main, /durable-resumed/);
-});
-
-test("durable jobs resume completed results and user-role workers stay on eligible device providers", async () => {
-  const { default: GatewayPlugin } = await importGatewayPlugin();
-  const request = {
-    taskId: "health.describe-food.extract",
-    durableJobId: "describe-food-durable-123",
-    messages: [{ role: "user", content: "oatmeal and berries" }],
-    schema: { type: "object", additionalProperties: false, required: ["ok"], properties: { ok: { type: "boolean" } } },
-    grounding: "google-search",
-    preferredProviders: ["gemini"],
-    metadata: { workflow: "describe-food" },
-  };
-  const completeJob = {
-    version: 1,
-    id: request.durableJobId,
-    taskId: request.taskId,
-    requesterDeviceId: "phone",
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    status: "complete",
-    durable: true,
-    messages: request.messages,
-    schema: request.schema,
-    grounding: request.grounding,
-    preferredProviders: request.preferredProviders,
-    metadata: request.metadata,
-    result: { data: { ok: true }, provider: "gemini", model: "gemini-model", traceId: "trace", attempts: 1 },
-  };
-  const plugin = Object.create(GatewayPlugin.prototype);
-  plugin.app = {
-    vault: {
-      getAbstractFileByPath: () => queueFile(`${REMOTE_AI_QUEUE_FOLDER}/${request.durableJobId}.md`),
-      read: async () => JSON.stringify(completeJob),
-    },
-  };
-  const resumed = await plugin.completeStructuredDurably(request);
-  assert.deepEqual(resumed.data, { ok: true });
-  await assert.rejects(() => plugin.completeStructuredDurably({ ...request, messages: [{ role: "user", content: "different" }] }), /different request/);
-  await assert.rejects(() => plugin.completeStructuredDurably({ ...request, grounding: undefined }), /different request/);
-
-  let submittedJob;
-  const submittingPlugin = Object.create(GatewayPlugin.prototype);
-  submittingPlugin.app = { vault: { getAbstractFileByPath: () => null } };
-  submittingPlugin.getDeviceId = () => "requesting-device";
-  submittingPlugin.createRemoteJob = async (job) => {
-    submittedJob = job;
-    return queueFile(`${REMOTE_AI_QUEUE_FOLDER}/${job.id}.md`);
-  };
-  submittingPlugin.canProcessRemoteJob = () => false;
-  submittingPlugin.scheduleRemoteQueueScan = () => {};
-  submittingPlugin.waitForRemoteJob = async () => completeJob.result;
-  await submittingPlugin.completeStructuredDurably(request);
-  assert.equal(submittedJob.durable, true, "new durable jobs must remain resumable after they sync and the app reopens");
-  assert.equal(submittedJob.grounding, "google-search");
-
-  const immediateOrder = [];
-  const immediatePlugin = Object.create(GatewayPlugin.prototype);
-  immediatePlugin.app = { vault: { getAbstractFileByPath: () => null } };
-  immediatePlugin.getDeviceId = () => "requesting-device";
-  immediatePlugin.createRemoteJob = async (job) => queueFile(`${REMOTE_AI_QUEUE_FOLDER}/${job.id}.md`);
-  immediatePlugin.canProcessRemoteJob = () => true;
-  immediatePlugin.processRemoteJob = async () => { immediateOrder.push("process"); };
-  immediatePlugin.waitForRemoteJob = async () => { immediateOrder.push("read-complete"); return completeJob.result; };
-  immediatePlugin.scheduleRemoteQueueScan = () => { throw new Error("a locally executable durable job must not wait for the background scanner"); };
-  const immediate = await immediatePlugin.completeStructuredDurably(request);
-  assert.equal(immediate.provider, "gemini");
-  assert.deepEqual(immediateOrder, ["process", "read-complete"]);
-  assert.match(main, /"durable-immediate"/);
-
-  const writes = [];
-  let exactProviders;
-  plugin.app = { vault: { modify: async (_file, body) => writes.push(JSON.parse(body)) } };
-  plugin.isControllerDevice = () => false;
-  plugin.getDeviceId = () => "gemini-worker";
-  plugin.remoteJobLocalProviders = () => ["gemini"];
-  plugin.completeStructuredLocally = async (_request, providers) => {
-    exactProviders = providers;
-    return completeJob.result;
-  };
-  plugin.notifyRemoteJob = async () => {};
-  await plugin.processRemoteJob(queueFile(`${REMOTE_AI_QUEUE_FOLDER}/worker.md`), { ...completeJob, id: "worker", status: "pending", result: undefined });
-  assert.deepEqual(exactProviders, ["gemini"]);
-  assert.deepEqual(writes.map((job) => job.status), ["processing", "complete"]);
-});
-
-test("remote queue validates jobs, reclaims stale work, and expires retained results", () => {
-  const now = Date.now();
-  const job = {
-    version: 1,
-    id: "job-1",
-    taskId: "health.describe-food.extract",
-    requesterDeviceId: "phone",
-    createdAt: new Date(now - 1000).toISOString(),
-    updatedAt: new Date(now - 1000).toISOString(),
-    status: "pending",
-    messages: [{ role: "user", content: "one piece salmon sashimi" }],
-    schema: { type: "object" },
-  };
-  assert.equal(parseRemoteAiJob(JSON.stringify(job))?.id, "job-1");
-  assert.equal(remoteAiJobIsClaimable(job, now), true);
-  assert.equal(remoteAiJobIsClaimable({ ...job, status: "processing", startedAt: new Date(now - 11 * 60 * 1000).toISOString() }, now), true);
-  assert.equal(remoteAiJobIsClaimable({ ...job, status: "processing", startedAt: new Date(now).toISOString() }, now), false);
-  assert.equal(remoteAiJobIsExpired({ ...job, status: "complete", updatedAt: new Date(now - 49 * 60 * 60 * 1000).toISOString() }, now), true);
-  assert.equal(remoteAiJobPath("job / unsafe"), "_assets/TPS AI Queue/job-unsafe.md");
-});
-
-test("remote queue scans only recursive Markdown children in public traversal order", async () => {
-  const { default: GatewayPlugin } = await importGatewayPlugin();
-  const directZ = queueFile(`${REMOTE_AI_QUEUE_FOLDER}/z-direct.md`);
-  const nestedM = queueFile(`${REMOTE_AI_QUEUE_FOLDER}/a-folder/m-middle.md`);
-  const deepB = queueFile(`${REMOTE_AI_QUEUE_FOLDER}/a-folder/deeper/b-deep.md`);
-  const directC = queueFile(`${REMOTE_AI_QUEUE_FOLDER}/c-direct.md`);
-  const ignoredFile = queueFile(`${REMOTE_AI_QUEUE_FOLDER}/a-folder/ignored.json`);
-  const root = queueFolder(REMOTE_AI_QUEUE_FOLDER, [
-    directZ,
-    queueFolder(`${REMOTE_AI_QUEUE_FOLDER}/a-folder`, [
-      nestedM,
-      ignoredFile,
-      queueFolder(`${REMOTE_AI_QUEUE_FOLDER}/a-folder/deeper`, [deepB]),
-    ]),
-    directC,
-  ]);
-  const readPaths = [];
-  let folderLookups = 0;
-  let wholeVaultCalls = 0;
-  const plugin = Object.create(GatewayPlugin.prototype);
-  plugin.remoteQueueScanInFlight = false;
-  plugin.remoteQueueRescanRequested = false;
-  plugin.isControllerDevice = () => true;
-  plugin.app = {
-    vault: {
-      getFolderByPath: (path) => {
-        folderLookups += 1;
-        return path === REMOTE_AI_QUEUE_FOLDER ? root : null;
-      },
-      getMarkdownFiles: () => {
-        wholeVaultCalls += 1;
-        throw new Error("Whole-vault enumeration is forbidden in this regression.");
-      },
-      read: async (file) => {
-        readPaths.push(file.path);
-        return JSON.stringify({
-          version: 1,
-          id: file.path.split("/").pop().replace(/\.md$/, ""),
-          taskId: "health.describe-food.extract",
-          requesterDeviceId: "phone",
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-          status: "complete",
-          messages: [{ role: "user", content: "synthetic request" }],
-          schema: { type: "object" },
-        });
-      },
-    },
-  };
-
-  await plugin.scanRemoteQueue("targeted-enumeration");
-
-  assert.deepEqual(readPaths, [directZ.path, nestedM.path, deepB.path, directC.path]);
-  assert.equal(folderLookups, 1);
-  assert.equal(wholeVaultCalls, 0);
-  const scannerSource = main.slice(
-    main.indexOf("private getRemoteQueueMarkdownFiles"),
-    main.indexOf("private async processRemoteJob"),
-  );
-  assert.match(scannerSource, /getFolderByPath\(path\)/);
-  assert.match(scannerSource, /Vault\.recurseChildren/);
-  assert.doesNotMatch(scannerSource, /getMarkdownFiles/);
-});
-
-test("remote queue treats a missing folder or exact-path file collision as an empty snapshot", async () => {
-  const { default: GatewayPlugin } = await importGatewayPlugin();
-  for (const collision of [false, true]) {
-    let reads = 0;
-    let wholeVaultCalls = 0;
-    const warnings = [];
-    const originalWarn = console.warn;
-    const plugin = Object.create(GatewayPlugin.prototype);
-    plugin.remoteQueueScanInFlight = false;
-    plugin.remoteQueueRescanRequested = false;
-    plugin.isControllerDevice = () => true;
-    plugin.app = {
-      vault: {
-        getFolderByPath: () => null,
-        getAbstractFileByPath: () => collision ? queueFile(REMOTE_AI_QUEUE_FOLDER) : null,
-        getMarkdownFiles: () => {
-          wholeVaultCalls += 1;
-          return [];
-        },
-        read: async () => {
-          reads += 1;
-          return "";
-        },
-      },
-    };
-
-    console.warn = (...args) => warnings.push(args);
-    try {
-      await plugin.scanRemoteQueue(collision ? "path-collision" : "missing-folder");
-    } finally {
-      console.warn = originalWarn;
-    }
-
-    assert.equal(reads, 0);
-    assert.equal(wholeVaultCalls, 0);
-    assert.deepEqual(warnings, []);
-    assert.equal(plugin.remoteQueueScanInFlight, false);
-    assert.equal(plugin.remoteQueueRescanRequested, false);
-  }
-});
-
-test("remote queue materializes a snapshot before reading its first file", async () => {
-  const { default: GatewayPlugin } = await importGatewayPlugin();
-  const firstFile = queueFile(`${REMOTE_AI_QUEUE_FOLDER}/first.md`);
-  const laterFile = queueFile(`${REMOTE_AI_QUEUE_FOLDER}/later.md`);
-  const root = queueFolder(REMOTE_AI_QUEUE_FOLDER, [firstFile]);
-  const readPaths = [];
-  const plugin = Object.create(GatewayPlugin.prototype);
-  plugin.remoteQueueScanInFlight = false;
-  plugin.remoteQueueRescanRequested = false;
-  plugin.isControllerDevice = () => true;
-  plugin.app = {
-    vault: {
-      getFolderByPath: () => root,
-      read: async (file) => {
-        readPaths.push(file.path);
-        if (readPaths.length === 1) root.children.push(laterFile);
-        return JSON.stringify({
-          version: 1,
-          id: file.path.split("/").pop().replace(/\.md$/, ""),
-          taskId: "health.describe-food.extract",
-          requesterDeviceId: "phone",
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-          status: "complete",
-          messages: [{ role: "user", content: "synthetic request" }],
-          schema: { type: "object" },
-        });
-      },
-    },
-  };
-
-  await plugin.scanRemoteQueue("snapshot");
-  assert.deepEqual(readPaths, [firstFile.path]);
-  await plugin.scanRemoteQueue("next-snapshot");
-  assert.deepEqual(readPaths, [firstFile.path, firstFile.path, laterFile.path]);
-});
-
-test("remote queue contains folder-enumeration failures to one scan pass", async () => {
-  const { default: GatewayPlugin } = await importGatewayPlugin();
-  const warnings = [];
-  const originalWarn = console.warn;
-  const plugin = Object.create(GatewayPlugin.prototype);
-  plugin.remoteQueueScanInFlight = false;
-  plugin.remoteQueueRescanRequested = false;
-  plugin.isControllerDevice = () => true;
-  plugin.app = {
-    vault: {
-      getFolderByPath: () => {
-        throw new Error("synthetic enumeration failure");
-      },
-    },
-  };
-
-  console.warn = (...args) => warnings.push(args);
-  try {
-    await plugin.scanRemoteQueue("enumeration-failure");
-  } finally {
-    console.warn = originalWarn;
-  }
-
-  assert.equal(warnings.length, 1);
-  assert.match(warnings[0][0], /scan-failed/);
-  assert.equal(warnings[0][1].reason, "enumeration-failure");
-  assert.match(warnings[0][1].error, /synthetic enumeration failure/);
-  assert.equal(plugin.remoteQueueScanInFlight, false);
-  assert.equal(plugin.remoteQueueRescanRequested, false);
-});
-
-test("remote queue coalesces overlapping scan requests into one trailing pass", async () => {
-  const { default: GatewayPlugin } = await importGatewayPlugin();
-  const firstReadEntered = deferred();
-  const allowFirstRead = deferred();
-  const firstFile = queueFile(`${REMOTE_AI_QUEUE_FOLDER}/complete-job-a.md`);
-  const secondFile = queueFile(`${REMOTE_AI_QUEUE_FOLDER}/nested/complete-job-b.md`);
-  const createCompleteJob = (id) => JSON.stringify({
-    version: 1,
-    id,
-    taskId: "health.describe-food.extract",
-    requesterDeviceId: "phone",
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    status: "complete",
-    messages: [{ role: "user", content: "synthetic request" }],
-    schema: { type: "object" },
-  });
-  let children = [firstFile];
-  let snapshots = 0;
-  const readPaths = [];
-  let activeReads = 0;
-  let maxActiveReads = 0;
-  const plugin = Object.create(GatewayPlugin.prototype);
-  plugin.remoteQueueScanInFlight = false;
-  plugin.remoteQueueRescanRequested = false;
-  plugin.isControllerDevice = () => true;
-  plugin.app = {
-    vault: queueVault(
-      () => {
-        snapshots += 1;
-        return [...children];
-      },
-      {
-        read: async (file) => {
-          readPaths.push(file.path);
-          activeReads += 1;
-          maxActiveReads = Math.max(maxActiveReads, activeReads);
-          try {
-            if (readPaths.length === 1) {
-              firstReadEntered.resolve();
-              await allowFirstRead.promise;
-            }
-            return createCompleteJob(file === firstFile ? "complete-job-a" : "complete-job-b");
-          } finally {
-            activeReads -= 1;
-          }
-        },
-      },
-    ),
-  };
-
-  const activeScan = plugin.scanRemoteQueue("initial");
-  await firstReadEntered.promise;
-  children = [firstFile, queueFolder(`${REMOTE_AI_QUEUE_FOLDER}/nested`, [secondFile])];
-  await Promise.all(Array.from({ length: 100 }, () => plugin.scanRemoteQueue("file-modified")));
-  allowFirstRead.resolve();
-  await activeScan;
-
-  assert.equal(snapshots, 2);
-  assert.equal(readPaths[0], firstFile.path);
-  assert.ok(readPaths.includes(secondFile.path));
-  assert.equal(maxActiveReads, 1);
-  assert.equal(plugin.remoteQueueScanInFlight, false);
-  assert.equal(plugin.remoteQueueRescanRequested, false);
-
-  const snapshotsBeforeQuietScan = snapshots;
-  children = [];
-  await plugin.scanRemoteQueue("quiet");
-  assert.equal(snapshots, snapshotsBeforeQuietScan + 1);
-});
-
-test("remote queue isolates a failed file without blocking later jobs", async () => {
-  const { default: GatewayPlugin } = await importGatewayPlugin();
-  const files = Array.from(
-    { length: 100 },
-    (_, index) => queueFile(`${REMOTE_AI_QUEUE_FOLDER}/job-${String(index).padStart(3, "0")}.md`),
-  );
-  const failedFile = files[37];
-  const readPaths = [];
-  const processedPaths = [];
-  const warnings = [];
-  let activeReads = 0;
-  let maxActiveReads = 0;
-  const originalWarn = console.warn;
-  const plugin = Object.create(GatewayPlugin.prototype);
-  plugin.remoteQueueScanInFlight = false;
-  plugin.remoteQueueRescanRequested = false;
-  plugin.isControllerDevice = () => true;
-  plugin.processRemoteJob = async (file) => {
-    processedPaths.push(file.path);
-  };
-  plugin.app = {
-    vault: queueVault(
-      () => [...files],
-      {
-        read: async (file) => {
-          readPaths.push(file.path);
-          activeReads += 1;
-          maxActiveReads = Math.max(maxActiveReads, activeReads);
-          try {
-            if (file === failedFile) throw new Error("synthetic read failure");
-            return JSON.stringify({
-              version: 1,
-              id: file.path.split("/").pop().replace(/\.md$/, ""),
-              taskId: "health.describe-food.extract",
-              requesterDeviceId: "phone",
-              createdAt: new Date().toISOString(),
-              updatedAt: new Date().toISOString(),
-              status: "pending",
-              messages: [{ role: "user", content: "synthetic request" }],
-              schema: { type: "object" },
-            });
-          } finally {
-            activeReads -= 1;
-          }
-        },
-      },
-    ),
-  };
-
-  console.warn = (...args) => warnings.push(args);
-  try {
-    await plugin.scanRemoteQueue("qa");
-  } finally {
-    console.warn = originalWarn;
-  }
-
-  assert.deepEqual(readPaths, files.map((file) => file.path));
-  assert.deepEqual(processedPaths, files.filter((file) => file !== failedFile).map((file) => file.path));
-  assert.equal(maxActiveReads, 1);
-  assert.equal(warnings.length, 1);
-  assert.match(warnings[0][0], /file-scan-failed/);
-  assert.equal(warnings[0][1].path, failedFile.path);
-  assert.equal(plugin.remoteQueueScanInFlight, false);
-  assert.equal(plugin.remoteQueueRescanRequested, false);
-});
-
-test("remote queue bounds an active epoch and defers work raised during its trailing pass", async () => {
-  const { default: GatewayPlugin } = await importGatewayPlugin();
-  const firstReadEntered = deferred();
-  const allowFirstRead = deferred();
-  const trailingReadEntered = deferred();
-  const allowTrailingRead = deferred();
-  const firstFile = queueFile(`${REMOTE_AI_QUEUE_FOLDER}/complete-job-a.md`);
-  const trailingFile = queueFile(`${REMOTE_AI_QUEUE_FOLDER}/nested/complete-job-b.md`);
-  let children = [firstFile];
-  let snapshots = 0;
-  let activeReads = 0;
-  let maxActiveReads = 0;
-  const scheduledReasons = [];
-  const plugin = Object.create(GatewayPlugin.prototype);
-  plugin.remoteQueueScanInFlight = false;
-  plugin.remoteQueueRescanRequested = false;
-  plugin.isControllerDevice = () => true;
-  plugin.scheduleRemoteQueueScan = (reason) => scheduledReasons.push(reason);
-  plugin.app = {
-    vault: queueVault(
-      () => {
-        snapshots += 1;
-        return [...children];
-      },
-      {
-        read: async (file) => {
-          activeReads += 1;
-          maxActiveReads = Math.max(maxActiveReads, activeReads);
-          try {
-            if (file === firstFile) {
-              firstReadEntered.resolve();
-              await allowFirstRead.promise;
-            } else {
-              trailingReadEntered.resolve();
-              await allowTrailingRead.promise;
-            }
-            return JSON.stringify({
-              version: 1,
-              id: file === firstFile ? "complete-job-a" : "complete-job-b",
-              taskId: "health.describe-food.extract",
-              requesterDeviceId: "phone",
-              createdAt: new Date().toISOString(),
-              updatedAt: new Date().toISOString(),
-              status: "complete",
-              messages: [{ role: "user", content: "synthetic request" }],
-              schema: { type: "object" },
-            });
-          } finally {
-            activeReads -= 1;
-          }
-        },
-      },
-    ),
-  };
-
-  const activeScan = plugin.scanRemoteQueue("initial");
-  await firstReadEntered.promise;
-  children = [queueFolder(`${REMOTE_AI_QUEUE_FOLDER}/nested`, [trailingFile])];
-  await plugin.scanRemoteQueue("during-initial");
-  allowFirstRead.resolve();
-  await trailingReadEntered.promise;
-  await plugin.scanRemoteQueue("during-trailing");
-  allowTrailingRead.resolve();
-  await activeScan;
-
-  assert.equal(snapshots, 2);
-  assert.equal(maxActiveReads, 1);
-  assert.deepEqual(scheduledReasons, ["queued-after-trailing"]);
-  assert.equal(plugin.remoteQueueScanInFlight, false);
-  assert.equal(plugin.remoteQueueRescanRequested, false);
-});
-
-test("remote queue skips a requested trailing pass after all processing authority is lost", async () => {
-  const { default: GatewayPlugin } = await importGatewayPlugin();
-  const firstReadEntered = deferred();
-  const allowFirstRead = deferred();
-  const file = queueFile(`${REMOTE_AI_QUEUE_FOLDER}/complete-job-a.md`);
-  let isController = true;
-  let snapshots = 0;
-  const scheduledReasons = [];
-  const plugin = Object.create(GatewayPlugin.prototype);
-  plugin.remoteQueueScanInFlight = false;
-  plugin.remoteQueueRescanRequested = false;
-  plugin.settings = { openAiApiKeySecret: "", geminiApiKeySecret: "" };
-  plugin.readSecret = () => "";
-  plugin.isControllerDevice = () => isController;
-  plugin.scheduleRemoteQueueScan = (reason) => scheduledReasons.push(reason);
-  plugin.app = {
-    vault: queueVault(
-      () => {
-        snapshots += 1;
-        return [file];
-      },
-      {
-        read: async () => {
-          firstReadEntered.resolve();
-          await allowFirstRead.promise;
-          return JSON.stringify({
-            version: 1,
-            id: "complete-job-a",
-            taskId: "health.describe-food.extract",
-            requesterDeviceId: "phone",
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-            status: "complete",
-            messages: [{ role: "user", content: "synthetic request" }],
-            schema: { type: "object" },
-          });
-        },
-      },
-    ),
-  };
-
-  const activeScan = plugin.scanRemoteQueue("initial");
-  await firstReadEntered.promise;
-  await plugin.scanRemoteQueue("file-modified");
-  isController = false;
-  allowFirstRead.resolve();
-  await activeScan;
-
-  assert.equal(snapshots, 1);
-  assert.deepEqual(scheduledReasons, []);
-  assert.equal(plugin.remoteQueueScanInFlight, false);
-  assert.equal(plugin.remoteQueueRescanRequested, false);
+test("direct device credentials preserve text, image and grounding validation", async()=>{
+ const {default:Gateway,validateInlineMedia}=await importGatewayPlugin();
+ const plugin=Object.create(Gateway.prototype);plugin.settings={providerOrder:['gemini','openai'],geminiApiKeySecret:'gemini',openAiApiKeySecret:'openai'};
+ plugin.readSecret=name=>name==='gemini'?'synthetic':'';
+ const calls=[];plugin.completeStructuredLocally=async request=>{calls.push(request);return {provider:'gemini',attempts:1};};
+ const request={taskId:'direct',messages:[{role:'user',content:'synthetic'}],schema:{type:'object'}};
+ for(const options of [{},{media:[{mimeType:'image/jpeg',data:'aGVsbG8='}]},{grounding:'google-search'}])assert.equal((await plugin.completeStructured({...request,...options})).provider,'gemini');
+ assert.equal(calls.length,3);
+ await assert.rejects(plugin.completeStructured({...request,durableJobId:'existing-job'}),/Durable AI jobs are retired/);
+ await assert.rejects(plugin.completeStructured({...request,grounding:'google-search',media:[{mimeType:'image/jpeg',data:'aGVsbG8='}]}),/cannot be combined/);
+ assert.throws(()=>validateInlineMedia({...request,media:[{mimeType:'image/gif',data:'aGVsbG8='}]}),/Unsupported inline image/);
+ plugin.readSecret=()=>'';await assert.rejects(plugin.completeStructured(request),/File-queue fallback is retired/);assert.equal(calls.length,3);
 });
 
 test("gateway settings use one configuration page with one diagnostics disclosure", () => {
-  for (const label of ["AI configuration", "Cloud", "On device", "TPS routed", "Primary AI", "Backup AI", "OpenAI API key", "OpenAI model", "Google AI API key", "Google AI model", "Use local Ollama", "Ollama URL", "Ollama model", "Use TishOS Apple Intelligence", "Enable logging"]) assert.ok(main.includes(label), label);
+  for (const label of ["AI configuration", "Cloud", "On device", "TPS routed", "Primary AI", "Backup AI", "OpenAI API key", "OpenAI model", "Google AI API key", "Google AI model", "Use local Ollama", "Ollama URL", "Ollama model", "Apple Intelligence unavailable", "Enable logging"]) assert.ok(main.includes(label), label);
   assert.doesNotMatch(main, /Choose what to configure|AI_SETTINGS_ROUTES|activeRoute/);
   assert.equal((main.match(/createEl\("details"/g) || []).length, 1);
   assert.match(main, /"aria-pressed": String\(mode === option.id\)/);
@@ -1510,28 +702,12 @@ test("device provider settings isolate two devices and retain explicit disabled 
 });
 
 
-test("ordinary primary and backup providers run in displayed order, including Apple after cloud", async () => {
-  const { default: Gateway } = await importGatewayPlugin(true);
-  const plugin = Object.create(Gateway.prototype);
-  plugin.settings = sanitizeSettings({ settingsVersion: 3, providerOrder: ["openai", "apple"], appleIntelligenceEnabled: true });
-  plugin.isControllerDevice = () => false;
-  plugin.readSecret = () => "test-secret";
-  const calls = [];
-  plugin.completeStructuredLocally = async (_request, exact) => { calls.push(exact[0]); throw new Error("provider unavailable"); };
-  plugin.completeStructuredWithTishOSAppleIntelligence = async () => { calls.push("apple"); return { provider: "apple" }; };
-  const request = { taskId: "ordered", messages: [{ role: "user", content: "test" }], schema: { type: "object" } };
-  const result = await plugin.completeStructured(request);
-  assert.equal(result.provider, "apple");
-  assert.equal(result.attempts, 2);
-  assert.deepEqual(calls, ["openai", "apple"]);
-  assert.equal(plugin.shouldUseTishOSAppleIntelligence(request), false, "durable cloud-first work must not jump to Apple");
-  plugin.settings.providerOrder = ["apple", "openai"];
-  calls.length = 0;
-  await plugin.completeStructured(request);
-  assert.deepEqual(calls, ["apple"]);
-  plugin.completeStructuredWithTishOSAppleIntelligence = async () => { throw Object.assign(new Error("pending"), { code: "TPS_AI_JOB_PENDING" }); };
-  await assert.rejects(() => plugin.completeStructured(request), { code: "TPS_AI_JOB_PENDING" });
-  assert.deepEqual(calls, ["apple"], "pending handoffs never launch a duplicate backup");
+test("direct primary and configured backup run in order",async()=>{
+ const {default:Gateway}=await importGatewayPlugin();const plugin=Object.create(Gateway.prototype);
+ plugin.settings=sanitizeSettings({settingsVersion:3,providerOrder:['openai','gemini']});plugin.readSecret=()=> 'synthetic';
+ const calls=[];plugin.completeStructuredLocally=async (_request,[provider])=>{calls.push(provider);if(provider==='openai')throw Error('unavailable');return {provider,attempts:1};};
+ const result=await plugin.completeStructured({taskId:'backup',messages:[{role:'user',content:'synthetic'}],schema:{type:'object'}});
+ assert.equal(result.provider,'gemini');assert.equal(result.attempts,2);assert.deepEqual(calls,['openai','gemini']);
 });
 
 test("Ollama works on a user device and no backup does not call another provider", async () => {
@@ -1550,38 +726,4 @@ test("Ollama works on a user device and no backup does not call another provider
   await assert.rejects(() => plugin.completeStructured(request), /offline/);
   plugin.settings.providerOrder = [];
   await assert.rejects(() => plugin.completeStructured(request), /Choose a primary/);
-});
-
-
-test("configured AI folders create new jobs there while durable results remain resumable in old locations", async () => {
- const {default:GatewayPlugin,tishOSAppleIntelligenceURL}=await importGatewayPlugin();
- const plugin=Object.create(GatewayPlugin.prototype);plugin.settings=sanitizeSettings({settingsVersion:3,providerOrder:['gemini']});
- const files=new Map(),folders=new Map();let saved;
- plugin.app={vault:{getAbstractFileByPath:p=>files.get(p)||folders.get(p),createFolder:async p=>folders.set(p,queueFolder(p)),create:async(p,text)=>{const f=queueFile(p);f.text=text;files.set(p,f);return f;},read:async f=>f.text,getFolderByPath:p=>queueFolder(p,[...files.values()].filter(f=>f.path.startsWith(p+'/')))}};
- plugin.saveSettings=async()=>{saved=clone(plugin.settings);};
- await plugin.setRequestFolder('_system/TPS AI Queue');assert.deepEqual(saved.previousQueueFolders,[REMOTE_AI_QUEUE_FOLDER]);
- const job={version:1,id:'custom-job-123',taskId:'health.describe-food.extract',requesterDeviceId:'phone',createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),status:'pending',messages:[{role:'user',content:'synthetic'}],schema:{type:'object'}};
- const f=await plugin.createRemoteJob(job);assert.equal(f.path,'_system/TPS AI Queue/custom-job-123.md');
- const old=queueFile(remoteAiJobPath('old-job-123'));old.text=JSON.stringify({...job,id:'old-job-123',status:'complete',durable:true,result:{data:{},provider:'gemini',model:'test',traceId:'old-job-123',attempts:1}});files.set(old.path,old);
- const result=await plugin.completeStructuredDurably({...job,durableJobId:'old-job-123'});assert.deepEqual(result.data,{});assert.equal(files.size,2);
- assert.deepEqual(plugin.getRemoteQueueMarkdownFiles().map(f=>f.path),[f.path,old.path]);
- assert.equal(tishOSAppleIntelligenceURL(job.id,'_system/TPS AI Queue'),'tishos://ai-gateway?job=custom-job-123&folder=_system%2FTPS%20AI%20Queue');
- assert.throws(()=>tishOSAppleIntelligenceURL(job.id,'../outside'));
-});
-
-test("AI folder validation and failed persistence preserve the existing route and providers",async()=>{
- const {default:GatewayPlugin}=await importGatewayPlugin();const plugin=Object.create(GatewayPlugin.prototype);plugin.settings=sanitizeSettings({settingsVersion:3,providerOrder:['openai']});
- plugin.app={vault:{getAbstractFileByPath:p=>p==='collision'?queueFile(p):null}};
- const before=clone(plugin.settings);plugin.saveSettings=async()=>{throw Error('disk failure');};
- for(const folder of ['', '/outside','../outside','.obsidian/queue','a//b','a\\b','a/../b','C:/outside','a\u007fb','食'.repeat(101),'collision'])await assert.rejects(()=>plugin.setRequestFolder(folder));
- await assert.rejects(()=>plugin.setRequestFolder('_system/AI'),/disk failure/);assert.deepEqual(plugin.settings,before);
- const persisted=sanitizeSettings({...before,remoteQueueFolder:'_system/AI',previousQueueFolders:[REMOTE_AI_QUEUE_FOLDER]});assert.deepEqual(resolveDeviceSettings(persisted,{}),persisted);
-});
-
-
-test("failed folder persistence retains a provider edit made while saving", async () => {
- const {default:GatewayPlugin}=await importGatewayPlugin();const plugin=Object.create(GatewayPlugin.prototype);plugin.settings=sanitizeSettings({settingsVersion:3,providerOrder:['openai']});
- plugin.app={vault:{getAbstractFileByPath:()=>null}};const save=deferred();plugin.saveSettings=async()=>{await save.promise;throw new Error('disk failure');};
- const change=plugin.setRequestFolder('_system/AI');plugin.settings.openAiModel='new-model';save.resolve();
- await assert.rejects(()=>change,/disk failure/);assert.equal(plugin.settings.remoteQueueFolder,REMOTE_AI_QUEUE_FOLDER);assert.equal(plugin.settings.openAiModel,'new-model');
 });

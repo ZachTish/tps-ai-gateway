@@ -1,3 +1,5 @@
+> Historical reference through 0.10.0. Queue transport, Apple handoff, polling, and automatic credential migration described below are retired in 1.0.0. See README.md for the current direct-request contract. Existing files and state are preserved.
+
 # Historical documentation reference
 
 Preserved from the README at 0.7.0, during the 2026-09-16 documentation cleanup. This includes earlier release notes, detailed contracts, and historical validation claims. Earlier setup steps or limitations may have been superseded. Start with [the current README](README.md), current source, and the tagged release. Relative source links remain rooted in this repository.

@@ -15,20 +15,7 @@ export const DEFAULT_SETTINGS: AiGatewaySettings = {
   geminiApiKeySecret: GEMINI_API_KEY_SECRET,
   geminiModel: "gemma-4-26b-a4b-it",
   enableLogging: false,
-  remoteQueueFolder: "_assets/TPS AI Queue",
-  previousQueueFolders: [],
 };
-
-export interface LegacyApiKeyMigration {
-  provider: "openai" | "gemini";
-  secretName: string;
-  value: string;
-}
-
-export interface SettingsMigrationPlan {
-  writes: LegacyApiKeyMigration[];
-  shouldPersist: boolean;
-}
 
 export interface SettingsPersistenceAdapter {
   loadLatest: () => Promise<unknown>;
@@ -56,14 +43,6 @@ const cloneSettings = (settings: AiGatewaySettings): AiGatewaySettings => JSON.p
 
 export const asSettingsRecord = (value: unknown): Record<string, unknown> => ({ ...record(value) });
 
-export function normalizeQueueFolder(value: unknown): string {
-  if (typeof value !== "string") throw new Error("Enter a vault-relative AI request folder.");
-  const folder = value.trim();
-  if (!folder || new TextEncoder().encode(folder).length > 300 || folder.split("/").some(part => !part || part.startsWith(".") || part !== part.trim() || /[\\:*?"<>|\p{Cc}]/u.test(part) || /[. ]$/.test(part)))
-    throw new Error("Use a vault-relative folder without hidden folders, empty segments, or traversal.");
-  return folder;
-}
-
 export function sanitizeSettings(value: unknown): AiGatewaySettings {
   const raw = record(value);
   const storedVersion = Number(raw.settingsVersion);
@@ -71,12 +50,9 @@ export function sanitizeSettings(value: unknown): AiGatewaySettings {
   const storedOrder = Array.isArray(raw.providerOrder)
     ? raw.providerOrder.filter((item): item is AiProviderId => providerIds.includes(item as AiProviderId))
     : DEFAULT_SETTINGS.providerOrder;
-  const order = Number.isFinite(storedVersion) && storedVersion >= 3
-    ? storedOrder
-    : ["apple" as const, ...storedOrder.filter((provider) => provider !== "apple")];
   return {
     settingsVersion,
-    providerOrder: [...new Set(order)],
+    providerOrder: [...new Set(storedOrder)],
     appleIntelligenceEnabled: typeof raw.appleIntelligenceEnabled === "boolean"
       ? raw.appleIntelligenceEnabled
       : DEFAULT_SETTINGS.appleIntelligenceEnabled,
@@ -87,8 +63,6 @@ export function sanitizeSettings(value: unknown): AiGatewaySettings {
     openAiModel: string(raw.openAiModel, DEFAULT_SETTINGS.openAiModel),
     geminiApiKeySecret: string(raw.geminiApiKeySecret, DEFAULT_SETTINGS.geminiApiKeySecret),
     geminiModel: string(raw.geminiModel, DEFAULT_SETTINGS.geminiModel),
-    remoteQueueFolder: normalizeQueueFolder(raw.remoteQueueFolder ?? DEFAULT_SETTINGS.remoteQueueFolder),
-    previousQueueFolders: Array.isArray(raw.previousQueueFolders) ? [...new Set(raw.previousQueueFolders.map(normalizeQueueFolder))] : [],
     enableLogging: typeof raw.enableLogging === "boolean" ? raw.enableLogging : false,
   };
 }
@@ -114,16 +88,6 @@ export function mergeChangedSettings(
   const latestVersion = Number(latest.settingsVersion);
   merged.settingsVersion = Number.isFinite(latestVersion) && latestVersion > 3 ? latestVersion : 3;
   return merged;
-}
-
-export function createMigratedSettingsPayload(
-  rawValue: unknown,
-  settings: AiGatewaySettings,
-): Record<string, unknown> {
-  const migrated: Record<string, unknown> = { ...asSettingsRecord(rawValue), ...settings };
-  delete migrated.openAiApiKey;
-  delete migrated.geminiApiKey;
-  return migrated;
 }
 
 /**
@@ -249,34 +213,6 @@ export function reconcilePersistedSettings(
     if (!valuesMatch(live[key], requested[key])) continue;
     (live as any)[key] = JSON.parse(JSON.stringify(persisted[key]));
   }
-}
-
-export function planLegacyApiKeyMigration(
-  value: unknown,
-  settings: AiGatewaySettings,
-  readSecret: (name: string) => string | null,
-): SettingsMigrationPlan {
-  const raw = record(value);
-  const storedVersion = Number(raw.settingsVersion);
-  if (Number.isFinite(storedVersion) && storedVersion > 3) {
-    return { writes: [], shouldPersist: false };
-  }
-  const candidates: Array<LegacyApiKeyMigration> = [
-    { provider: "openai", secretName: settings.openAiApiKeySecret, value: string(raw.openAiApiKey, "") },
-    { provider: "gemini", secretName: settings.geminiApiKeySecret, value: string(raw.geminiApiKey, "") },
-  ];
-  const writes = candidates.filter(({ secretName, value: legacyValue }) => (
-    Boolean(legacyValue) && !String(readSecret(secretName) || "").trim()
-  ));
-  const shouldPersist = storedVersion !== 3
-    || Object.prototype.hasOwnProperty.call(raw, "openAiApiKey")
-    || Object.prototype.hasOwnProperty.call(raw, "geminiApiKey")
-    || typeof raw.openAiApiKeySecret !== "string"
-    || typeof raw.geminiApiKeySecret !== "string"
-    || typeof raw.appleIntelligenceEnabled !== "boolean"
-    || !Array.isArray(raw.providerOrder)
-    || !raw.providerOrder.includes("apple");
-  return { writes, shouldPersist };
 }
 
 export const DEVICE_SETTINGS_KEY = "tps-ai-gateway-settings-v1";
