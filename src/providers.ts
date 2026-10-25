@@ -1,4 +1,5 @@
 import { requestUrl } from "obsidian";
+import { callSubscription } from "./subscription-cli";
 import { assertSchema } from "./schema";
 import type { AiGatewaySettings, AiGroundingMode, AiGroundingSource, AiInlineMedia, AiMessage, AiProviderCredentials, AiProviderId } from "./types";
 
@@ -14,6 +15,18 @@ export async function callProvider(
   if (provider === "apple") throw new Error("Apple Intelligence requests must be handed to the TishOS iOS app.");
   if (media.length && provider !== "gemini") throw new Error(`${provider} does not support TPS inline image requests.`);
   if (grounding && provider !== "gemini") throw new Error(`${provider} does not support Google Search grounding.`);
+  if (provider === "gemini-cli" || provider === "grok-cli") return callSubscription(provider, settings, messages, schema);
+  if (provider === "compatible") {
+    const url = validateCompatibleUrl(settings.compatibleUrl);
+    if (!settings.compatibleModel.trim()) throw new Error("Choose a model for the compatible API connection.");
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (credentials.compatibleApiKey) headers.Authorization = `Bearer ${credentials.compatibleApiKey}`;
+    const response = await requestUrl({ url: `${url}/chat/completions`, method: "POST", headers, throw: false,
+      body: JSON.stringify({ model: settings.compatibleModel, stream: false, messages: collapseSystemMessages(messages, schema) }) });
+    if (response.status < 200 || response.status >= 300) throw new Error(`Compatible API returned HTTP ${response.status}. Check its URL, model, credential and allowance.`);
+    return { text: String(response.json?.choices?.[0]?.message?.content || "").trim(), model: settings.compatibleModel };
+  }
+  if (provider === "apple-shortcuts") throw new Error("Apple Shortcuts requires an explicit foreground handoff.");
   if (provider === "ollama") {
     if (!settings.ollamaEnabled) throw new Error("Ollama is disabled.");
     const response = await requestUrl({ url: `${settings.ollamaUrl}/api/chat`, method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: settings.ollamaModel, stream: false, format: schema, messages: collapseSystemMessages(messages, schema), options: { temperature: 0 } }) });
@@ -251,4 +264,14 @@ function splitSystemMessages(messages: AiMessage[]): {
     }
   });
   return { instructions: systemContents.join("\n"), rest };
+}
+
+export function validateCompatibleUrl(value: string): string {
+  let url: URL;
+  try { url = new URL(value); } catch { throw new Error("Enter the provider's API base URL, including /v1 when required."); }
+  const local = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+  if ((url.protocol !== "https:" && !(local && url.protocol === "http:")) || url.username || url.password || url.search || url.hash) {
+    throw new Error("Use HTTPS, or HTTP on localhost, without credentials, query parameters or fragments in the URL.");
+  }
+  return url.toString().replace(/\/+$/, "");
 }

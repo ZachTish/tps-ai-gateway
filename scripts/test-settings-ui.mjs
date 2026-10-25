@@ -18,7 +18,7 @@ export class Element {
 }
 export class App {}
 export class Notice {}
-export const Platform = { isIosApp: false };
+export const Platform = globalThis.__tpsAiTestPlatform;
 export class Plugin {}
 export class PluginSettingTab { constructor(app) { this.app = app; this.containerEl = new Element(); } }
 class Control {
@@ -47,6 +47,7 @@ export class TFolder {}
 export class Vault {}
 export async function requestUrl() { throw new Error('No network in UI tests'); }
 `;
+globalThis.__tpsAiTestPlatform = {isMacOS: true, isIosApp: false};
 const compiled = await build({
   entryPoints: [fileURLToPath(new URL('../src/main.ts', import.meta.url))], bundle: true, format: 'esm', platform: 'node', write: false,
   plugins: [{ name: 'ui-stub', setup(build) {
@@ -64,97 +65,77 @@ function setup(order = ['apple', 'ollama', 'openai', 'gemini']) {
 }
 const field = (ui, prefix) => ui.fields().find(item => item.name.startsWith(prefix));
 
-test('opening settings preserves existing routes and exposes every legacy backup without saving', async () => {
-  const ui = setup();
+test('settings now configure providers directly without Controller, writes or requests', () => {
+  const ui = setup(['gemini-cli']);
   assert.equal(ui.saves(), 0);
-  assert.deepEqual(ui.plugin.settings.providerOrder, ['apple', 'ollama', 'openai', 'gemini']);
-  assert.equal(field(ui, 'Backup AI').control.value, 'existing');
-  for (const [provider, label] of [['ollama', 'Ollama URL'], ['openai', 'OpenAI API key'], ['gemini', 'Google AI API key']]) {
-    field(ui, 'Configure existing backup').control.change(provider);
-    assert.ok(field(ui, label));
-    assert.ok(ui.elements().find(el => el.attrs['data-ai-focus'] === 'backup-editor').focused);
-  }
-  assert.equal(ui.saves(), 0);
-  assert.ok(field(ui, 'Apple Intelligence unavailable'));
+  assert.ok(field(ui, 'Provider'));
+  assert.ok(field(ui, 'Connect Google Gemini'));
+  assert.equal(field(ui, 'OpenAI API key'), undefined);
   assert.equal(ui.elements().filter(el => el.tag === 'details').length, 1);
   assert.ok(field(ui, 'Enable logging'));
+  const tab = new AiGatewaySettingTab({}, ui.plugin); tab.display();
+  assert.ok(tab.containerEl.all().some(el => el.setting?.name === 'Provider'));
+  assert.ok(!tab.containerEl.all().some(el => el.setting?.name === 'AI connections'));
+  tab.hide(); assert.equal(ui.saves(), 0);
 });
 
-test('all modes show only their provider controls and keep disabled provider configuration editable', async () => {
-  const ui = setup(['openai']);
-  assert.ok(field(ui, 'OpenAI API key'));
-  assert.equal(field(ui, 'Ollama URL'), undefined);
-  for (const [label, provider, visible] of [['On device', 'ollama', 'Ollama URL'], ['TPS routed (unavailable)', 'apple', 'Apple Intelligence unavailable'], ['Cloud', 'gemini', 'Google AI model']]) {
-    ui.elements().find(el => el.tag === 'button' && el.text === label).click();
-    await Promise.resolve();
-    assert.deepEqual(ui.plugin.settings.providerOrder, [provider]);
-    assert.ok(field(ui, visible));
-    assert.equal(ui.elements().filter(el => el.attrs['aria-pressed'] === 'true').length, 1);
+test('all providers expose only their own connection fields and explicit test', async () => {
+  const ui = setup([]);
+  const cases = [
+    ['gemini-cli','Connect Google Gemini'], ['grok-cli','Connect Grok'],
+    ['apple-shortcuts','Shortcut name'], ['compatible','API base URL'],
+    ['gemini','Google AI API key'], ['openai','OpenAI API key'], ['ollama','Ollama URL'],
+  ];
+  for (const [id, name] of cases) {
+    await field(ui, 'Provider').control.change(id); await Promise.resolve();
+    assert.deepEqual(ui.plugin.settings.providerOrder, [id]);
+    assert.ok(field(ui, name), id);
+    assert.ok(field(ui, 'Test connection'), id);
     assert.ok(ui.elements().find(el => el.attrs['data-ai-focus'] === 'primary').focused);
   }
-  assert.equal(ui.plugin.settings.appleIntelligenceEnabled, false);
   assert.equal(ui.plugin.settings.ollamaEnabled, false);
   assert.equal(ui.plugin.settings.openAiModel, 'existing');
 });
 
-test('backup selection replaces only the backup chain and none removes its editor', async () => {
+test('existing retired route and every backup remain editable without implicit migration', async () => {
   const ui = setup();
-  await field(ui, 'Backup AI').control.change('gemini');
-  assert.deepEqual(ui.plugin.settings.providerOrder, ['apple', 'gemini']);
-  assert.ok(field(ui, 'Google AI API key'));
-  assert.equal(field(ui, 'Configure existing backup'), undefined);
-  assert.equal(field(ui, 'Ollama URL'), undefined);
-  await field(ui, 'Backup AI').control.change('none');
-  assert.deepEqual(ui.plugin.settings.providerOrder, ['apple']);
-  assert.equal(field(ui, 'Google AI API key'), undefined);
-  assert.ok(ui.elements().find(el => el.attrs['data-ai-focus'] === 'backup').focused);
-});
-
-test('selecting a former backup as primary removes duplicates and preserves remaining backups', async () => {
-  const ui = setup();
-  ui.elements().find(el => el.tag === 'button' && el.text === 'Cloud').click();
-  await Promise.resolve();
-  assert.deepEqual(ui.plugin.settings.providerOrder, ['openai', 'ollama', 'gemini']);
-  field(ui, 'Cloud provider').control.change('gemini');
-  await Promise.resolve();
-  assert.deepEqual(ui.plugin.settings.providerOrder, ['gemini', 'ollama']);
-});
-
-test('empty provider order remains empty until an explicit primary selection', async () => {
-  const ui = setup([]);
+  assert.deepEqual(ui.plugin.settings.providerOrder, ['apple','ollama','openai','gemini']);
   assert.equal(ui.saves(), 0);
-  assert.equal(field(ui, 'Backup AI').control.disabled, true);
-  assert.equal(ui.elements().filter(el => el.attrs['aria-pressed'] === 'true').length, 0);
-  ui.elements().find(el => el.tag === 'button' && el.text === 'Cloud').click();
-  await Promise.resolve();
-  assert.deepEqual(ui.plugin.settings.providerOrder, ['gemini']);
+  assert.ok(field(ui, 'Retired Apple bridge'));
+  assert.equal(field(ui, 'Backup provider').control.value, 'existing');
+  for (const [id,name] of [['ollama','Ollama URL'],['openai','OpenAI API key'],['gemini','Google AI API key']]) {
+    field(ui, 'Configure existing backup').control.change(id);
+    assert.ok(field(ui, name));
+  }
+  await field(ui, 'Backup provider').control.change('none');
+  assert.deepEqual(ui.plugin.settings.providerOrder, ['apple']);
+  assert.equal(field(ui, 'Configure existing backup'), undefined);
 });
 
-
-test('retired request folder and Apple toggle are absent without changing saved settings',()=>{
- const ui=setup(['apple']);
- assert.equal(field(ui,'Request files folder'),undefined);
- assert.equal(field(ui,'Use TishOS Apple Intelligence'),undefined);
- assert.ok(field(ui,'Apple Intelligence unavailable'));
- assert.deepEqual(ui.plugin.settings.providerOrder,['apple']);
- assert.equal(ui.saves(),0);
+test('selecting an existing backup as primary avoids duplicates and preserves other backups', async () => {
+  const ui=setup();
+  field(ui,'Provider').control.change('gemini'); await Promise.resolve();
+  assert.deepEqual(ui.plugin.settings.providerOrder,['gemini','ollama','openai']);
 });
 
-
-test('plugin settings only hand off and never expose duplicate provider editors', () => {
-  const calls = [];
-  const tab = new AiGatewaySettingTab({plugins:{plugins:{'tps-controller':{api:{openConnectionSettings: id => calls.push(id)}}}}});
-  tab.display();
-  const fields = tab.containerEl.all().filter(el => el.setting).map(el => el.setting);
-  assert.deepEqual(fields.map(field => field.name), ['AI connections']);
-  fields[0].button.click(); assert.deepEqual(calls, ['ai']);
+test('mobile clearly labels desktop-only connections and disables connect/test', () => {
+  globalThis.__tpsAiTestPlatform.isMacOS=false;
+  const ui=setup(['gemini-cli']);
+  assert.equal(field(ui,'Connect Google Gemini').button.disabled,true);
+  assert.equal(field(ui,'Test connection').button.disabled,true);
+  assert.ok(ui.elements().some(el => el.text.includes('cannot run on iPhone')));
+  globalThis.__tpsAiTestPlatform.isMacOS=true;
 });
-test('disposed editor cannot re-render after a delayed save finishes', async () => {
-  const ui = setup(['openai']);
-  let finish;
-  ui.plugin.saveSettings = () => new Promise(resolve => {finish = resolve;});
-  ui.elements().find(el => el.text === 'On device').click();
-  const children = ui.tab.containerEl.children;
-  ui.tab.dispose(); finish(); await Promise.resolve();
-  assert.equal(ui.tab.containerEl.children, children);
+
+test('test targets exactly the selected provider and no calls happen during rendering', async()=>{
+ const ui=setup(['openai']);const calls=[];ui.plugin.validateProviderChain=async p=>calls.push(p);
+ assert.equal(calls.length,0);await field(ui,'Test connection').button.click();assert.deepEqual(calls,['openai']);
+});
+
+test('disposed editor cannot rerender after delayed save and failure restores route', async()=>{
+ const ui=setup(['openai']);let finish;ui.plugin.saveSettings=()=>new Promise(resolve=>finish=resolve);
+ field(ui,'Provider').control.change('gemini');const before=ui.tab.containerEl.children;ui.tab.dispose();finish();await Promise.resolve();
+ assert.equal(ui.tab.containerEl.children,before);
+ const failed=setup(['openai']);failed.plugin.saveSettings=async()=>{throw Error('disk')};
+ field(failed,'Provider').control.change('gemini');await Promise.resolve();await Promise.resolve();assert.deepEqual(failed.plugin.settings.providerOrder,['openai']);
 });

@@ -1,4 +1,4 @@
-export type AiProviderId = "apple" | "ollama" | "openai" | "gemini";
+export type AiProviderId = "apple" | "ollama" | "openai" | "gemini" | "gemini-cli" | "grok-cli" | "compatible" | "apple-shortcuts";
 
 export interface AiGatewaySettings {
   settingsVersion: number;
@@ -12,11 +12,20 @@ export interface AiGatewaySettings {
   geminiApiKeySecret: string;
   geminiModel: string;
   enableLogging: boolean;
+  geminiCliPath: string;
+  geminiCliModel: string;
+  grokCliPath: string;
+  grokCliModel: string;
+  compatibleUrl: string;
+  compatibleModel: string;
+  compatibleApiKeySecret: string;
+  appleShortcutName: string;
 }
 
 export interface AiProviderCredentials {
   openAiApiKey: string;
   geminiApiKey: string;
+  compatibleApiKey?: string;
 }
 
 export interface AiMessage {
@@ -100,6 +109,7 @@ export interface TpsAiGatewayApi {
   readonly features: {
     readonly googleSearchGrounding: true;
     readonly appleIntelligence: false;
+    readonly appleShortcuts: boolean;
   };
   completeStructured<T>(request: StructuredRequest): Promise<StructuredResult<T>>;
   choose<T>(request: Omit<StructuredRequest, "schema"> & { options: DecisionOption<T>[] }): Promise<DecisionResult<T>>;

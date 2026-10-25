@@ -5,7 +5,7 @@ export const GEMINI_API_KEY_SECRET = "tps-ai-gateway-gemini-api-key";
 
 export const DEFAULT_SETTINGS: AiGatewaySettings = {
   settingsVersion: 3,
-  providerOrder: ["apple", "ollama", "openai", "gemini"],
+  providerOrder: [],
   appleIntelligenceEnabled: true,
   ollamaEnabled: true,
   ollamaUrl: "http://127.0.0.1:11434",
@@ -15,6 +15,14 @@ export const DEFAULT_SETTINGS: AiGatewaySettings = {
   geminiApiKeySecret: GEMINI_API_KEY_SECRET,
   geminiModel: "gemma-4-26b-a4b-it",
   enableLogging: false,
+  geminiCliPath: "gemini",
+  geminiCliModel: "",
+  grokCliPath: "grok",
+  grokCliModel: "",
+  compatibleUrl: "",
+  compatibleModel: "",
+  compatibleApiKeySecret: "tps-ai-gateway-compatible-api-key",
+  appleShortcutName: "TPS AI",
 };
 
 export interface SettingsPersistenceAdapter {
@@ -35,7 +43,7 @@ interface SettingsSaveWaiter {
   reject: (error: unknown) => void;
 }
 
-const providerIds: AiProviderId[] = ["apple", "ollama", "openai", "gemini"];
+const providerIds: AiProviderId[] = ["apple", "ollama", "openai", "gemini", "gemini-cli", "grok-cli", "compatible", "apple-shortcuts"];
 const record = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const string = (value: unknown, fallback: string): string => typeof value === "string" ? value.trim() : fallback;
 const valuesMatch = (left: unknown, right: unknown): boolean => JSON.stringify(left) === JSON.stringify(right);
@@ -64,6 +72,15 @@ export function sanitizeSettings(value: unknown): AiGatewaySettings {
     geminiApiKeySecret: string(raw.geminiApiKeySecret, DEFAULT_SETTINGS.geminiApiKeySecret),
     geminiModel: string(raw.geminiModel, DEFAULT_SETTINGS.geminiModel),
     enableLogging: typeof raw.enableLogging === "boolean" ? raw.enableLogging : false,
+    geminiCliPath: string(raw.geminiCliPath, DEFAULT_SETTINGS.geminiCliPath),
+    geminiCliModel: string(raw.geminiCliModel, DEFAULT_SETTINGS.geminiCliModel),
+    grokCliPath: string(raw.grokCliPath, DEFAULT_SETTINGS.grokCliPath),
+    grokCliModel: string(raw.grokCliModel, DEFAULT_SETTINGS.grokCliModel),
+    compatibleUrl: string(raw.compatibleUrl, DEFAULT_SETTINGS.compatibleUrl),
+    compatibleModel: string(raw.compatibleModel, DEFAULT_SETTINGS.compatibleModel),
+    compatibleApiKeySecret: string(raw.compatibleApiKeySecret, DEFAULT_SETTINGS.compatibleApiKeySecret),
+    appleShortcutName: string(raw.appleShortcutName, DEFAULT_SETTINGS.appleShortcutName),
+
   };
 }
 

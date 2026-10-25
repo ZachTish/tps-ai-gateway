@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {build} from 'esbuild';
 import {readFileSync,existsSync} from 'node:fs';
-const result=await build({entryPoints:['src/main.ts'],bundle:true,write:false,platform:'node',format:'esm',plugins:[{name:'obsidian',setup(b){b.onResolve({filter:/^obsidian$/},()=>({path:'obsidian',namespace:'stub'}));b.onLoad({filter:/.*/,namespace:'stub'},()=>({contents:'export class Plugin {} export class PluginSettingTab {} export class App {} export class Notice {} export class Setting {} export class SecretComponent {} export const requestUrl=()=>{throw Error("Unexpected provider request")};'}));}}]});
+const result=await build({entryPoints:['src/main.ts'],bundle:true,write:false,platform:'node',format:'esm',plugins:[{name:'obsidian',setup(b){b.onResolve({filter:/^obsidian$/},()=>({path:'obsidian',namespace:'stub'}));b.onLoad({filter:/.*/,namespace:'stub'},()=>({contents:'export const Platform = {isMacOS:false,isIosApp:false}; export class Plugin {} export class PluginSettingTab {} export class App {} export class Notice {} export class Setting {} export class SecretComponent {} export const requestUrl=()=>{throw Error("Unexpected provider request")};'}));}}]});
 const {default:Gateway}=await import('data:text/javascript;base64,'+Buffer.from(result.outputFiles[0].text).toString('base64'));
 const request={taskId:'fixture',messages:[{role:'user',content:'synthetic'}],schema:{type:'object'}};
 function harness(order=['openai']){
@@ -10,7 +10,7 @@ function harness(order=['openai']){
  g.settings={providerOrder:order,ollamaEnabled:true,openAiApiKeySecret:'fixture',geminiApiKeySecret:'fixture'};
  g.app={vault:new Proxy({}, {get(){assert.fail('Queue accessed vault');}})};
  g.loadSettings=async()=>{};g.addSettingTab=()=>{};g.addCommand=()=>{};
- g.registerEvent=()=>assert.fail('Queue listener registered');g.registerInterval=()=>assert.fail('Queue timer registered');
+ g.registerObsidianProtocolHandler=()=>{};g.registerEvent=()=>assert.fail('Queue listener registered');g.registerInterval=()=>assert.fail('Queue timer registered');
  g.readSecret=()=> 'synthetic';
  g.completeStructuredLocally=async(r,providers)=>{calls.push({r,providers});return {data:{ok:true},provider:providers[0],model:'fixture',traceId:'fixture',attempts:1};};
  return {g,calls};

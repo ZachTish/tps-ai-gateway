@@ -1,105 +1,70 @@
 # TPS AI Gateway
 
-## 1.0.0 — Explicit direct AI requests
+Explicit structured AI requests for TPS plugins. Obsidian 1.12.0+; desktop and mobile. No queue files, background workers, vault scans, or automatic provider requests.
 
-The synced Markdown queue is removed. Startup registers no queue listeners or timers and performs no queue reads, claims, writes, notifications, or Apple URL handoffs. Existing files, credentials and local state remain untouched. Direct user-requested OpenAI, Gemini and Ollama requests, structured schemas and guarded capabilities remain available.
+## Connect a provider
 
-This is a **major release**: `durableJobId` requests fail explicitly before any provider call; Apple Intelligence reports unavailable (`features.appleIntelligence: false`) and does not silently fall back. Missing direct credentials no longer create queued jobs. Configure a direct provider in **Controller → Connections → AI**. The request-folder control and Apple enable toggle are gone. SecretStorage references remain valid; historical plaintext credentials are preserved but are no longer automatically adopted. Explicit settings saves preserve inert legacy and unknown fields. No migration replays pending jobs.
+Open **Settings → TPS AI Gateway**. Choose a provider, follow its connection steps, then select **Test connection**. The test sends only a synthetic JSON request to that exact provider and consumes its normal allowance. Opening settings never connects, scans for tools, reads credentials, saves settings, or sends requests. A new installation starts with no provider selected.
 
-The settings hub remains a native Open connections handoff. Controller renders one provider editor, with primary/backup selectors and one Diagnostics disclosure. Opening it sends no requests and saves nothing. Mobile layout still stacks native controls; physical iPhone acceptance remains unverified.
+| Choice | Connection | Platforms / limits |
+| --- | --- | --- |
+| Google Gemini subscription | Official Gemini CLI 0.65.0+; Connect opens Google sign-in in Terminal | macOS. Sign in using the Google account with the eligible subscription. Text only. |
+| Grok subscription | Current official Grok Build; Connect opens its login in Terminal | macOS. Requires Grok Build access on the account. Text only; adapter's authenticated end-to-end acceptance remains unverified. |
+| Apple Intelligence · Shortcuts | A user-owned shortcut using Apple's **Use Model** action | Supported Mac/iPhone/iPad with Apple Intelligence enabled. Foreground handoff; text only. |
+| Local / open models · Ollama | Existing Ollama server and installed model | Localhost means the current device. Mobile requires a secured reachable server. |
+| Other provider · Compatible API | Provider's API base URL, model ID, optional device-local secret | Chat Completions endpoints, including local servers. HTTPS required except localhost. JSON is requested in the prompt and validated on return. |
+| Google Gemini / Gemma · API key | Google AI Studio secret and model | Desktop/mobile; this is separate from Google AI subscription sign-in. Existing image and Gemini grounding support remain. |
+| OpenAI · API key | OpenAI API secret and model | Desktop/mobile. API billing is separate from consumer subscriptions. |
 
-Validation: 37 passing tests cover direct transport shapes (mocked, no external requests), schema/capability safety, settings concurrency, zero queue registrations, 20 settings loads without credential/storage writes, explicit retirement errors, and unload during a pending settings read. Runtime source drops by 553 lines (18 added, 571 deleted). The initialization regression reproduced two late registrations before the lifecycle guard. Final versioned tests, separate build, test deployment and installed checks are recorded in [release notes](release-notes/1.0.0.md).
+OpenCode is a client, not a universal subscription credential. Use its underlying provider's supported API endpoint for general note requests. Coding-only subscriptions are not presented as general-purpose API access. The compatible API URL is explicit: for example an xAI API account uses `https://api.x.ai/v1`; that does not connect a Grok consumer subscription.
 
-The integrated foreground warm-reload comparison measured current versus cleaned medians of 6066.2 vs 6084.7 ms (0.3% difference), and 20-note navigation medians of 897.2 vs 838.9 ms. These are combined test-vault samples, not AI-specific or production cold-start claims. Idle, typing, Sync-burst, settings and Finance checks observed zero TPS maintenance writes. See the cleanup acceptance evidence for scope and remaining platform checks.
+Subscription tools are installed separately using their official instructions; this plugin does not install or upgrade them automatically. **Connect** opens the official tool, with its own isolated TPS profile. The user completes account sign-in; the plugin never reads or copies login tokens from another app. The model can remain blank to use the tool's default. Paths accept only an executable name or absolute path, not shell commands. These connections currently require macOS and do not forward phone requests through a Mac.
 
-Rollback can reactivate old queue workers and replay preserved jobs. Stop owners before downgrading. This release is for a BRAT pull after test-vault validation; it does not install production or configure TishOS. Health's cleanup removes its durable-job callers; old callers receive the explicit retirement error until updated.
+### Apple shortcut
 
-## Historical behavior through 0.10.0
+Create a shortcut named **TPS AI** (or set its name in Gateway):
 
-The sections below describe prior releases, including retired queue behavior. The 1.0.0 contract above supersedes them.
+1. Add **Use Model**, selecting **On-Device** or **Private Cloud Compute**.
+2. Set its prompt to **Shortcut Input**. Disable **Follow Up**.
+3. Return the model response as text, without a display/confirmation step replacing the result.
 
-## 0.10.0 — AI setup in Controller
+The shortcut's model selection owns whether computation is local or uses Apple's cloud. Selecting this connection does not prove that Apple Intelligence is available or that the shortcut uses a particular model. Test it on each device. The user remains in control of the shortcut and Apple's permissions.
 
-Open **Controller → Connections → AI** to configure primary/backup providers, models, URLs, credentials, enablement, request folder, and diagnostics. AI Gateway's settings page is now a single direct **Open connections** handoff. The existing AI editor is mounted inside Controller, without duplicate controls or a new settings store. It requires Controller 2.6.0+ for configuration; already configured AI requests still execute without it.
+Gateway sends the explicit request through Apple's supported x-callback URL and accepts one bounded response for an unpredictable request token in the requesting vault. Cancel, error, timeout, unload, invalid JSON and schema errors fail explicitly. A foreground handoff never starts a backup on failure, preventing duplicate requests. Keep Obsidian running; these are not durable jobs. Inputs above 12,000 characters and results above 64,000 characters are rejected. Physical iPhone acceptance remains unverified.
 
-The connection editor API is `api.connectionSettings = { version: 1, render(parent): dispose }`. Controller mounts one editor at a time and disposes it on navigation/hide. Provider-specific editors retain the existing save paths, runtime adapters, commands, and device state. No keys, tokens, pairing authority, queued requests, connection IDs, sync cursors, or note mappings are copied or reset. No connection or provider test runs merely from opening settings. Missing/outdated plugins produce an upgrade/enable message instead of a duplicate configuration surface.
+## Settings and ownership
 
-The provider editor retains Cloud, On device, and TPS routed selection, all existing backup providers, conditional controls, focus restoration and the one Diagnostics disclosure. Controller supplies the mobile wrapping layout. The Validate provider chain command remains explicit and available. Existing request/capability APIs and device-local persistence are unchanged. This additive UI/API consolidation is a minor release; minimum Obsidian remains 1.12.0. See [release validation](release-notes/0.10.0.md) for tests, final build, test deployment/reload/UI checks, limitations and hashes.
+One flat **AI connection** page, with a native provider selector and only the selected provider's fields. **Advanced** is the sole disclosure; it contains optional subscription executable/model overrides, backups, preserved legacy-chain editors and logging. Settings are now accessible without Controller. The existing `connectionSettings.render` API remains available for a Controller handoff and mounts the same editor, not a second settings store.
 
+Provider order, model IDs, URLs, executable paths and secret references remain device-local in the existing `tps-ai-gateway-settings-v1` envelope. API credentials stay in Obsidian SecretStorage. All previous saved values, unknown fields, inert queue settings and disabled states are preserved; no automatic credential adoption or route migration occurs. Existing retired `apple` routes remain visibly unavailable until the user selects another provider. New Apple Shortcuts uses the distinct `apple-shortcuts` ID, so the retired file bridge cannot be accidentally reactivated.
 
-Structured AI requests and guarded, domain-owned capabilities for TPS plugins.
+The UI uses native controls, labelled selectors, focus restoration and plugin-scoped CSS. Mobile stacks fields and wraps controls. Route/disclosure/editor state is transient. Existing provider settings, enablement, backup order, logging and the **Validate provider chain** command remain. New actions are per-provider Connect, setup guide and exact-provider Test connection. No empty categories or nested disclosures.
 
-Current release: [1.0.0](https://github.com/ZachTish/tps-ai-gateway/releases/tag/1.0.0) · Obsidian 1.12.0+ · Desktop and mobile.
+## Runtime contract
 
-## Install with BRAT
+- `completeStructured()` validates returned JSON against the caller's schema.
+- `choose()` returns a caller-supplied stable option ID.
+- Capabilities remain domain-owned: proposal and confirmed execution are separate, schema-checked operations.
+- Explicit preferred providers and configured backups retain their order. Images and Google Search grounding still require the direct Google API adapter; the new subscription/Shortcuts connections are text-only.
+- `features.appleIntelligence` stays false for the retired TishOS bridge; `features.appleShortcuts` reports availability of the handoff implementation on Apple platforms, not model readiness.
+- Durable job IDs fail before provider execution. No polling, synced mailbox, fallback writer, startup inference or note mutation.
 
-Add `ZachTish/tps-ai-gateway` to BRAT. Use manual updates with `Latest`, or freeze an exact numeric tag for a controlled rollout. Each release supplies `main.js`, `manifest.json`, and `styles.css`; release notes record validation and artifact hashes. A published release is not evidence that any device has installed it.
+Subscription processes use argument arrays without a shell, a temporary working directory outside the vault, bounded output and a terminating timeout. Dedicated policy profiles disable built-in tools, extensions/hooks and project context for Gemini; Grok uses a known built-in allowlist followed by denial of that tool, denial of subagents and MCP operations, and a dedicated profile without user plugins. Account tools retain their own authentication and session data under `~/Library/Application Support/TPS AI Gateway/<provider>`; this is private local application state, never a vault record. Subprocesses are stopped when Gateway unloads. Provider errors do not expose raw CLI stderr, prompts or login data. The plugin itself has no access to CLI credentials.
 
-## Configure this device
+## Development
 
-**Controller → Connections → AI** contains **Primary AI** with three choices: **Cloud** (Google AI or OpenAI), **On device** (Ollama), and **TPS routed** (TishOS Apple Intelligence). **Backup AI** sits directly below, with None or a specific provider. Only the primary and selected backup editors appear. An existing longer backup chain is preserved until explicitly replaced; its selector lets you edit each existing backup in place. Switching the primary replaces the first provider and removes duplicates from the remaining backups. Disabled Ollama and Apple routes retain editable controls and their existing enablement toggles.
-
-Provider order, enablement, endpoints/models, secret references, and diagnostics remain in the same vault-scoped device-local storage. Actual API keys stay in Obsidian SecretStorage. Opening the page never saves settings or sends a request. The request-folder setting and prior queue locations are device-local too. Backup editor selection and focus are transient.
-
-Ordinary requests try providers in order, including Apple as a backup after cloud. Ollama can run directly on user-role devices as well as Controllers. Missing credentials, disabled providers, or unavailable Apple platforms are skipped. Provider-specific requests can prefer another provider; images and grounding use Google AI. A pending Apple handoff does not start a duplicate backup. Existing durable queue contracts are retained: Apple-first durable jobs remain exclusively with TishOS; cloud queue workers do not launch Apple backups, and durable Ollama work still needs an eligible Controller worker. Text without a usable local provider retains the existing synced queue fallback. Thus None removes configured provider backups; it does not disable durable queue recovery or caller-specified providers.
-
-TishOS Apple Intelligence is available through the existing iPhone/iPad handoff. It may use Apple Private Cloud Compute when eligible, then the on-device model; TPS routed is not a promise of strictly on-device inference. Ollama loopback requires a running server on the same device; mobile needs a reachable secured endpoint.
-
-**Diagnostics** is the single intentional disclosure at the bottom. The previous Cloud providers, Device AI, and Diagnostics destinations are removed. Native mode buttons expose `aria-pressed`, conditional rerenders restore focus, and all CSS is plugin-scoped. On narrow screens settings stack, mode choices form a compact scrollable strip, fields fill the width, and navigation is not sticky. Extend this page for related configuration rather than reintroducing separate provider pages.
-
-Preserved control inventory: OpenAI secret/model, Google AI secret/model, Apple enablement, Ollama enablement/URL/model, and logging. The Validate provider chain command and all public API actions remain available. Added controls are primary mode/cloud provider, optional backup, and the transient editor selector for legacy backup chains.
-
-## Configurable request folder — 0.9.0
-
-**Request files folder · This device → Apply folder** sets the location used by queued requests, including Describe food. Use `_system/TPS AI Queue` or another non-hidden vault-relative directory. Direct provider requests still need no queue file. Configure the same folder on all participating devices and keep it included in vault sync. The default remains `_assets/TPS AI Queue`; no files move merely by installing this release.
-
-Only new jobs use the new folder. Existing jobs remain readable, processable and resumable at their original locations, with the normal completed-job retention cleanup. This avoids moving a job while another device or Apple Intelligence is responding. `remoteQueueFolder` and `previousQueueFolders` persist in the existing device-local settings envelope. Duplicate durable job identities across known locations fail rather than creating another job. Invalid paths and destination-file collisions fail before saving. Unrelated provider edits survive a failed folder save.
-
-Apple Intelligence handoffs include the actual job folder only when it differs from the legacy default. **Custom folders with Apple Intelligence require TishOS Companion 0.16.9 (140) or later.** Update the companion before changing that route's folder; the default job-only URL remains compatible with older apps. The URL contains a bounded folder and job identity, never the prompt or result. Existing vault authorization and queue validation still apply.
-
-The flat configuration page, primary/backup controls, commands, and single Diagnostics disclosure remain. The new text field and explicit Apply button appear before Diagnostics, including when AI is disabled. They use the existing keyboard and narrow-screen layout. Focused coverage checks folder validation, new job creation, old durable completion, previous-folder scans, Apple URL routing, failed saves, and explicit Apply behavior. This additive minor release keeps Obsidian 1.12.0 as its minimum.
-
-Validation on 2026-09-18: all 46 checks pass, including the new folder and concurrent-save cases; TypeScript and the production build pass. The versioned test runtime was reloaded and the actual settings page inspected. A traversal path produced a Notice without saving; a valid Inbox path was applied through the UI and created a synthetic completed queue file in that location. Keyboard Tab reached Apply folder. Original device-local settings were restored with an identical hash, and the fixture was moved directly to `_archive`. Existing primary/backup controls and the one Diagnostics disclosure remained present. No inference request was sent. The companion custom-folder route additionally passes focused native tests; its release has separate TestFlight validation and availability gates.
-
-## 0.8.0 validation and release
-
-This backward-compatible minor release adds explicit primary/backup controls and consolidates configuration. Minimum Obsidian remains 1.12.0. Regression coverage includes every mode, conditional controls, disabled-provider editing, legacy chains, empty routes, focus and selection state, disclosure depth, mobile CSS, provider order, pending-handoff safety, and direct Ollama on a user device. The full suite contains 42 checks; the production build includes TypeScript validation. On 2026-09-17, the full 42-check suite passed and the separate final production build deployed only to `[runtime-deploy] target=test`. The plugin was reloaded with `obsidian plugin:reload id=tps-ai-gateway` in the verified Obsidian Plugin Test Vault. Desktop and a 600 px settings window were inspected: all three modes, Google/OpenAI credentials and models, Ollama controls, Apple controls, None/provider backups, legacy backup editors, focus restoration, and the single Diagnostics disclosure. Mode changes were exercised against an in-memory settings-tab fixture with a no-op save method, so real provider settings were never changed. The narrow layout had no horizontal overflow. Device-local settings and runtime `data.json` SHA-256 hashes matched their pre-QA values. No inference command, credential picker, or external automation was invoked. Artifact hashes are in the release notes; production was not accessed.
-
-The release was isolated on `feature/unified-ai-settings` in the contained `tps-ai-gateway Unified Settings (Worktree)` checkout from current `origin/main`, preserving the older canonical checkout’s unrelated README and ignore-file edits.
-
-## Request and capability contracts
-
-- `completeStructured()` validates returned data against the caller's schema.
-- `choose()` returns one caller-supplied stable option ID.
-- `registerCapability()` registers a schema and domain-owned handler.
-- `proposeCapability()` prepares a proposal from an explicit allowlist; `executeCapability()` remains a separate, guarded step.
-
-The gateway does not invent capability IDs or write arbitrary vault files. Provider fallback and durable queue behavior retain their existing bounds. Queue-backed text requests can be carried by vault synchronization; device-local credentials are not carried with them. Image and grounding support depend on the requested provider and model.
-
-Missing or failed providers are handled without logging secrets, prompts, full responses, or note bodies. No provider test runs merely because settings are opened. See [the detailed reference](REFERENCE.md) for request types, queue lifecycle, provider constraints, migration history, and validation.
-
-## Development and repository policy
-
-`main` is the stable source line. Numeric tags identify immutable released artifacts. `optimization` is an unreleased work-in-progress lane; do not install it through BRAT or merge it into stable without separate validation.
-
-The supported build lives inside `Obsidian Plugin Test Vault/Plugin Development`, with `tps-ai-gateway` as the mapped stable source. These repositories depend on adjacent shared tooling including `deploy-runtime.mjs`; a standalone clone is not currently self-contained.
-
-From the contained workspace, prepare dependencies using the shared helper, then run tests and a separate final build:
+The scoped checkout is `/Users/zachtisherman/Developer/TPS/Plugin Development/tps-ai-gateway-provider-setup-task`, based on immutable 1.0.0. Existing paused checkouts and their unrelated edits remain untouched. Follow the workspace source map and release checklist. Build scripts are repository-local and never deploy:
 
 ```sh
-# From Plugin Development:
-node ./prepare-dependencies.mjs "tps-ai-gateway"
-cd "tps-ai-gateway"
+# From /Users/zachtisherman/Developer/TPS/Plugin Development
+node prepare-dependencies.mjs tps-ai-gateway-provider-setup-task
+# From this checkout
 npm test
 npm run build
+# Explicit test deployment from the workspace, after validation:
+node deploy-runtime.mjs --target test tps-ai-gateway-provider-setup-task
 ```
 
-Dependencies stay in the vault's `.plugin-dev-cache.nosync` through a relative `node_modules` symlink. Use a clean, current checkout; preserve unrelated changes and never build an old dirty worktree into the test runtime. Stable builds deploy only shipped artifacts to the test vault. Optimization builds are build-only. Runtime `data.json`, secrets, caches, and session state never belong in Git.
+Tests cover old adapters/contracts and settings concurrency, the new provider editor, platform restrictions, exact-provider tests, subscription argument/environment boundaries, real synthetic subprocess timeout/cancellation/output limits, Apple callback ownership/concurrency/limits, and the compatible API transport. Network transports and authenticated subscription/Apple inference are mocked unless a release receipt explicitly states otherwise. Account sign-in, provider eligibility and physical-device acceptance must not be inferred from unit tests.
 
-Documentation-only maintenance does not create a new plugin version. Published release tags and assets are preserved. Do not rely on legacy version/release scripts without reviewing their current behavior. Production updates remain the user's BRAT handoff.
-
-For prior feature details and release-specific evidence, see [REFERENCE.md](REFERENCE.md) and [GitHub releases](https://github.com/ZachTish/tps-ai-gateway/releases). The September 16 cleanup changes documentation and repository metadata, not shipped behavior.
-
-### Unload during initialization
-
-The gateway stops initialization if unloaded while its settings read is pending. A focused regression reproduced two late registrations and API publication after unload; the guard prevents both without registering a replacement listener or timer. Provider tests use mocked transports and make no external requests.
+Official integration references: [Gemini sign-in](https://geminicli.com/docs/get-started/authentication/), [Grok Build authentication](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md), [Apple Use Model](https://support.apple.com/guide/shortcuts/use-apple-intelligence-in-shortcuts-tpg3vrvwmclv/ios), [Shortcuts callback contract](https://support.apple.com/guide/shortcuts/apdcd7f20a6f/ios). Historical validation remains in `release-notes/` and immutable GitHub releases.

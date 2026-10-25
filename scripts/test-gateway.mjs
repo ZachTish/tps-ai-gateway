@@ -138,7 +138,7 @@ test("gateway owns provider transport and fallback", () => {
   assert.match(providers, /credentials\.geminiApiKey/);
   assert.match(providers, /"x-goog-api-key": apiKey/);
   assert.doesNotMatch(providers, /generateContent\?key=/);
-  assert.match(main, /features: \{ googleSearchGrounding: true, appleIntelligence: false \}/);
+  assert.match(main, /features: \{ googleSearchGrounding: true, appleIntelligence: false, appleShortcuts: Boolean\(Platform.isMacOS \|\| Platform.isIosApp\) \}/);
 });
 
 test("all providers preserve system and conversational message request shapes", async () => {
@@ -436,7 +436,7 @@ test("gateway bounds stalled providers and redacts credential-bearing failures",
     "failed https://example.test/run?key=[redacted]&mode=1 Bearer [redacted]",
   );
   assert.match(main, /withProviderTimeout/);
-  assert.match(main, /logger\.errorSummary\(error, \[credentials\.openAiApiKey, credentials\.geminiApiKey\]\)/);
+  assert.match(main, /logger\.errorSummary\(error, \[credentials\.openAiApiKey, credentials\.geminiApiKey, credentials\.compatibleApiKey\]\)/);
 });
 
 test("gateway diagnostics never log caller-controlled metadata values", () => {
@@ -676,19 +676,13 @@ test("direct device credentials preserve text, image and grounding validation", 
  plugin.readSecret=()=>'';await assert.rejects(plugin.completeStructured(request),/File-queue fallback is retired/);assert.equal(calls.length,3);
 });
 
-test("gateway settings use one configuration page with one diagnostics disclosure", () => {
-  for (const label of ["AI configuration", "Cloud", "On device", "TPS routed", "Primary AI", "Backup AI", "OpenAI API key", "OpenAI model", "Google AI API key", "Google AI model", "Use local Ollama", "Ollama URL", "Ollama model", "Apple Intelligence unavailable", "Enable logging"]) assert.ok(main.includes(label), label);
-  assert.doesNotMatch(main, /Choose what to configure|AI_SETTINGS_ROUTES|activeRoute/);
+test("gateway settings keep one native provider selector and one optional disclosure", () => {
+  for (const label of ["AI connection", "Provider", "Backup provider", "OpenAI API key", "OpenAI model", "Google AI API key", "Google AI model", "Use local Ollama", "Ollama URL", "Ollama model", "Retired Apple bridge", "Enable logging", "Connect", "Test connection"]) assert.ok(main.includes(label), label);
   assert.equal((main.match(/createEl\("details"/g) || []).length, 1);
-  assert.match(main, /"aria-pressed": String\(mode === option.id\)/);
+  assert.match(main, /"aria-label", "AI provider"/);
   assert.match(main, /focus\(\{ preventScroll: true \}\)/);
-  assert.match(stylesSource, /:focus-visible/);
-  assert.match(stylesSource, /height: auto/);
-  assert.match(stylesSource, /\.tps-ai-settings-modes button\.tps-ai-settings-mode \{ width: auto/);
-  assert.match(stylesSource, /@media \(max-width: 700px\)/);
-  assert.match(stylesSource, /overflow-x: auto/);
-  assert.match(stylesSource, /flex-direction: column/);
-  assert.match(stylesSource, /width: 100%/);
+  assert.match(stylesSource, /:focus-visible/);assert.match(stylesSource, /height: auto/);
+  assert.match(stylesSource, /@media \(max-width: 700px\)/);assert.match(stylesSource, /flex-direction: column/);
 });
 
 test("device provider settings isolate two devices and retain explicit disabled values", () => {
@@ -726,4 +720,33 @@ test("Ollama works on a user device and no backup does not call another provider
   await assert.rejects(() => plugin.completeStructured(request), /offline/);
   plugin.settings.providerOrder = [];
   await assert.rejects(() => plugin.completeStructured(request), /Choose a primary/);
+});
+
+test("unload during a failed request prevents starting a backup or another diagnostic", async () => {
+  const { default: Gateway } = await importGatewayPlugin();
+  const plugin = Object.create(Gateway.prototype);
+  plugin.settings = sanitizeSettings({providerOrder: ["openai", "gemini"]});
+  plugin.readSecret = () => "synthetic";
+  const calls = [];
+  plugin.completeStructuredLocally = async (_request, [provider]) => {
+    calls.push(provider); plugin.unloading = true; throw new Error("cancelled");
+  };
+  const request = {taskId: "unload", messages: [{role: "user", content: "synthetic"}], schema: {type: "object"}};
+  await assert.rejects(plugin.completeStructured(request), /closed/);
+  assert.deepEqual(calls, ["openai"]);
+  await assert.rejects(Gateway.prototype.completeStructuredLocally.call(plugin, request, ["gemini-cli"]), /closed/);
+  await assert.rejects(plugin.completeAppleShortcut(request), /closed/);
+});
+
+
+test("compatible API uses the explicit URL/model/secret and rejects unsafe endpoints", async () => {
+  const calls=[];const imported=await importProvidersModule(async options=>{calls.push(options);return {status:200,json:{choices:[{message:{content:'{"ok":true}'}}]}};});
+  try {
+    const settings=sanitizeSettings({compatibleUrl:'https://api.example.test/v1/',compatibleModel:'model'});
+    const result=await imported.module.callProvider('compatible',settings,{openAiApiKey:'',geminiApiKey:'',compatibleApiKey:'synthetic-key'},[{role:'user',content:'synthetic'}],{type:'object'});
+    assert.equal(result.text,'{"ok":true}');assert.equal(calls[0].url,'https://api.example.test/v1/chat/completions');
+    assert.equal(calls[0].headers.Authorization,'Bearer synthetic-key');assert.equal(JSON.parse(calls[0].body).model,'model');
+    for(const url of ['http://remote.test/v1','https://u:p@host/v1','https://host/v1?key=bad','file:///tmp/test'])assert.throws(()=>imported.module.validateCompatibleUrl(url));
+    assert.equal(imported.module.validateCompatibleUrl('http://localhost:1234/v1'),'http://localhost:1234/v1');
+  } finally { imported.cleanup(); }
 });
