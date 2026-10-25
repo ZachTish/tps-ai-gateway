@@ -5,6 +5,18 @@ export const APPLE_CALLBACK = "tps-ai-shortcut-result";
 export const APPLE_MAX_INPUT = 12_000;
 export const APPLE_MAX_RESULT = 64_000;
 
+// Native URL handlers decode percent escapes, not form-encoded '+' spaces.
+const query = (values: Record<string, string>) => new URLSearchParams(values).toString().replace(/\+/g, "%20");
+
+export function parseAppleShortcutResponse(text: string): unknown {
+  const trimmed = text.trim();
+  // Use Model can wrap valid JSON in a code block even with Text output selected.
+  // Accept only a whole JSON value or one whole JSON fence, never surrounding prose.
+  const candidate = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)?.[1] ?? trimmed;
+  try { return JSON.parse(candidate); }
+  catch { throw new Error("The Apple shortcut did not return valid JSON."); }
+}
+
 interface Pending {
   nonce: string;
   vault: string;
@@ -22,8 +34,8 @@ export class AppleShortcutConnection {
     const prompt = structuredPrompt(messages, schema);
     if (prompt.length > APPLE_MAX_INPUT) return Promise.reject(new Error("This request is too large for the Apple Shortcuts handoff. Use a direct provider."));
     const nonce = this.nonce();
-    const callback = (status: string) => `obsidian://${APPLE_CALLBACK}?${new URLSearchParams({ vault, nonce, status })}`;
-    const url = `shortcuts://x-callback-url/run-shortcut?${new URLSearchParams({ name: name.trim(), input: "text", text: prompt, "x-success": callback("success"), "x-error": callback("error"), "x-cancel": callback("cancel") })}`;
+    const callback = (status: string) => `obsidian://${APPLE_CALLBACK}?${query({ vault, nonce, status })}`;
+    const url = `shortcuts://x-callback-url/run-shortcut?${query({ name: name.trim(), input: "text", text: prompt, "x-success": callback("success"), "x-error": callback("error"), "x-cancel": callback("cancel") })}`;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => this.pending?.nonce === nonce && this.pending.finish(undefined, new Error("Apple Shortcuts did not return before the timeout. No backup request was sent.")), this.timeoutMs);
       this.pending = { nonce, vault, finish: (value, error) => {
@@ -34,9 +46,11 @@ export class AppleShortcutConnection {
     });
   }
 
-  receive(params: Record<string, string>): void {
+  receive(params: Record<string, string>, receivingVault: string): void {
     const pending = this.pending;
-    if (!pending || params.nonce !== pending.nonce || params.vault !== pending.vault) return;
+    // Obsidian consumes the `vault` URL parameter while routing the callback.
+    // Validate the receiving app's vault, never a missing/untrusted callback field.
+    if (!pending || params.nonce !== pending.nonce || receivingVault !== pending.vault) return;
     if (params.status === "cancel" || params.status === "error") {
       pending.finish(undefined, new Error(params.status === "cancel" ? "Apple Shortcuts was cancelled." : "Apple Shortcuts failed. Check the shortcut and Apple Intelligence availability."));
       return;

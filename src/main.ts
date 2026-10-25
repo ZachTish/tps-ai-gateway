@@ -1,6 +1,6 @@
 import { DEVICE_SETTINGS_KEY, resolveDeviceSettings } from "./settings";
 import { App, Notice, Platform, Plugin, PluginSettingTab, SecretComponent, Setting } from "obsidian";
-import { APPLE_CALLBACK, AppleShortcutConnection } from "./apple-shortcuts";
+import { APPLE_CALLBACK, AppleShortcutConnection, parseAppleShortcutResponse } from "./apple-shortcuts";
 import { cancelSubscriptionRequests, openSubscriptionLogin } from "./subscription-cli";
 import { callProvider } from "./providers";
 import { withProviderTimeout } from "./provider-timeout";
@@ -45,7 +45,7 @@ export default class TpsAiGatewayPlugin extends Plugin {
     };
     (this as any).api = this.api;
     (this.app as any).tpsAiGateway = this.api;
-    this.registerObsidianProtocolHandler(APPLE_CALLBACK, params => this.appleShortcut.receive(params));
+    this.registerObsidianProtocolHandler(APPLE_CALLBACK, params => this.appleShortcut.receive(params, this.app.vault.getName()));
     this.addSettingTab(new AiGatewaySettingTab(this.app, this));
     this.addCommand({ id: "validate-provider-chain", name: "Validate provider chain", callback: () => void this.validateProviderChain() });
     logger.flow("Plugin", "load", { providers: this.settings.providerOrder, ollamaEnabled: this.settings.ollamaEnabled });
@@ -227,8 +227,7 @@ export default class TpsAiGatewayPlugin extends Plugin {
     if (!Platform.isMacOS && !Platform.isIosApp) throw new Error("Apple Shortcuts requires macOS or iOS with Apple Intelligence.");
     if (request.media?.length || request.grounding) throw new Error("The Apple shortcut connection supports text requests only.");
     const response = await this.appleShortcut.request(this.settings.appleShortcutName, this.app.vault.getName(), request.messages, request.schema);
-    let data: T;
-    try { data = JSON.parse(response.text); } catch { throw new Error("The Apple shortcut must return JSON text without Markdown or other output."); }
+    const data = parseAppleShortcutResponse(response.text) as T;
     assertSchema(data, request.schema);
     return { data, provider: "apple-shortcuts", model: response.model, traceId: makeTraceId(request.taskId), attempts: 1 };
   }
@@ -274,7 +273,7 @@ export class AiGatewaySettingTab extends PluginSettingTab {
 
 export const AI_PROVIDERS: AiProviderId[] = ["gemini-cli", "grok-cli", "apple-shortcuts", "ollama", "compatible", "gemini", "openai"];
 export const PROVIDER_LABELS: Record<AiProviderId, string> = {
-  "gemini-cli": "Google Gemini subscription · Mac",
+  "gemini-cli": "Gemini Code Assist · Eligible work account · Mac",
   "grok-cli": "Grok subscription · Mac",
   "apple-shortcuts": "Apple Intelligence · Shortcuts",
   ollama: "Local / open models · Ollama",
@@ -365,7 +364,9 @@ export class AiConnectionSettings {
     if (provider === "gemini-cli" || provider === "grok-cli") {
       const gemini = provider === "gemini-cli";
       const label = gemini ? "Gemini CLI" : "Grok Build";
-      container.createEl("p", { text: `Use your subscription through ${label} on this Mac. Sign in with an account that includes access to the tool.` });
+      container.createEl("p", { text: gemini
+        ? "Gemini CLI requires an eligible Code Assist work account. Google ended personal Google AI Pro/Ultra access to this CLI; those subscriptions now use Antigravity, which this connection does not support."
+        : `Use your subscription through ${label} on this Mac. Sign in with an account that includes access to the tool.` });
       if (!Platform.isMacOS) container.createEl("p", { text: "This connection cannot run on iPhone. Choose Apple Shortcuts or an API provider on this device." });
       new Setting(container).setName(`Connect ${gemini ? "Google Gemini" : "Grok"}`)
         .setDesc(gemini ? "Install Gemini CLI 0.65.0 or newer, then sign in with Google in the opened Terminal. Close Terminal after signing in." : "Install current Grok Build, then sign in in the opened Terminal.")
@@ -376,7 +377,7 @@ export class AiConnectionSettings {
           finally { if (!this.disposed) button.setDisabled(!Platform.isMacOS); }
         }));
     } else if (provider === "apple-shortcuts") {
-      container.createEl("p", { text: "In Apple Shortcuts, create a shortcut named TPS AI: add Use Model, choose On-Device or Private Cloud Compute, use Shortcut Input as its prompt, and return the model response as text. Turn off Follow Up. Requires Apple Intelligence on this device." });
+      container.createEl("p", { text: "In Apple Shortcuts, create a shortcut named TPS AI: add Use Model, choose On-Device or Private Cloud Compute, use Shortcut Input as its prompt, and return the model response as text. Turn off Follow Up. Requires Apple Intelligence on this device. Approve Obsidian’s Open Link prompt and Shortcuts’ output prompt when shown." });
       textSetting(container, this.plugin, "Shortcut name", "Each request opens Shortcuts and returns its answer to Obsidian. Keep Obsidian open; requests are not queued.", "appleShortcutName");
       new Setting(container).setName("Apple setup").addButton(button => button.setButtonText("Setup guide").onClick(() => window.open("https://support.apple.com/guide/shortcuts/use-apple-intelligence-in-shortcuts-tpg3vrvwmclv/ios")));
     } else if (provider === "compatible") {
@@ -388,7 +389,7 @@ export class AiConnectionSettings {
       secretReferenceSetting(container, this.plugin, "OpenAI API key", "API billing is separate from ChatGPT subscriptions.", "openAiApiKeySecret");
       textSetting(container, this.plugin, "OpenAI model", "Structured-output model ID.", "openAiModel");
     } else if (provider === "gemini") {
-      secretReferenceSetting(container, this.plugin, "Google AI API key", "This is an AI Studio API connection. To use your Google AI subscription on Mac, choose Google Gemini subscription above.", "geminiApiKeySecret");
+      secretReferenceSetting(container, this.plugin, "Google AI API key", "This is an AI Studio API connection, billed separately from Google AI Pro/Ultra. Consumer subscription sign-in is not supported here.", "geminiApiKeySecret");
       textSetting(container, this.plugin, "Google AI model", "Hosted Gemini or Gemma model ID. Images and Google Search grounding use this connection.", "geminiModel");
     } else if (provider === "ollama") {
       new Setting(container).setName("Use local Ollama · This device").setDesc("Use an installed open model without a cloud subscription.")

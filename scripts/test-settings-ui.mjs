@@ -79,6 +79,14 @@ test('settings now configure providers directly without Controller, writes or re
   tab.hide(); assert.equal(ui.saves(), 0);
 });
 
+test('Google eligibility distinguishes work accounts from discontinued consumer CLI access',()=>{
+ const ui=setup(['gemini-cli']);
+ assert.match(field(ui,'Provider').control.options['gemini-cli'],/Eligible work account/);
+ assert.ok(ui.elements().some(el=>el.text.includes('ended personal Google AI Pro/Ultra access')));
+ assert.ok(ui.elements().some(el=>el.text.includes('Antigravity')));
+ const api=setup(['gemini']);assert.match(field(api,'Google AI API key').description,/billed separately/);
+});
+
 test('all providers expose only their own connection fields and explicit test', async () => {
   const ui = setup([]);
   const cases = [

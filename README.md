@@ -8,7 +8,7 @@ Open **Settings → TPS AI Gateway**. Choose a provider, follow its connection s
 
 | Choice | Connection | Platforms / limits |
 | --- | --- | --- |
-| Google Gemini subscription | Official Gemini CLI 0.65.0+; Connect opens Google sign-in in Terminal | macOS. Sign in using the Google account with the eligible subscription. Text only. |
+| Gemini Code Assist · Eligible work account | Official Gemini CLI 0.65.0+; Connect opens Google sign-in in Terminal | macOS. Requires an eligible Code Assist work account. Personal Google AI Pro/Ultra subscriptions no longer work with this CLI. |
 | Grok subscription | Current official Grok Build; Connect opens its login in Terminal | macOS. Requires Grok Build access on the account. Text only; adapter's authenticated end-to-end acceptance remains unverified. |
 | Apple Intelligence · Shortcuts | A user-owned shortcut using Apple's **Use Model** action | Supported Mac/iPhone/iPad with Apple Intelligence enabled. Foreground handoff; text only. |
 | Local / open models · Ollama | Existing Ollama server and installed model | Localhost means the current device. Mobile requires a secured reachable server. |
@@ -20,6 +20,8 @@ OpenCode is a client, not a universal subscription credential. Use its underlyin
 
 Subscription tools are installed separately using their official instructions; this plugin does not install or upgrade them automatically. **Connect** opens the official tool, with its own isolated TPS profile. The user completes account sign-in; the plugin never reads or copies login tokens from another app. The model can remain blank to use the tool's default. Paths accept only an executable name or absolute path, not shell commands. These connections currently require macOS and do not forward phone requests through a Mac.
 
+Google moved personal Google AI subscriptions from Gemini CLI to [Antigravity](https://antigravity.google/docs/cli/gcli-migration/). Google sign-in alone does not establish eligibility: the service can reject a personal account after OAuth succeeds. Antigravity is not integrated here; the existing Gemini API connection uses separate API billing. Do not represent Gemini CLI as a consumer subscription connection.
+
 ### Apple shortcut
 
 Create a shortcut named **TPS AI** (or set its name in Gateway):
@@ -30,7 +32,9 @@ Create a shortcut named **TPS AI** (or set its name in Gateway):
 
 The shortcut's model selection owns whether computation is local or uses Apple's cloud. Selecting this connection does not prove that Apple Intelligence is available or that the shortcut uses a particular model. Test it on each device. The user remains in control of the shortcut and Apple's permissions.
 
-Gateway sends the explicit request through Apple's supported x-callback URL and accepts one bounded response for an unpredictable request token in the requesting vault. Cancel, error, timeout, unload, invalid JSON and schema errors fail explicitly. A foreground handoff never starts a backup on failure, preventing duplicate requests. Keep Obsidian running; these are not durable jobs. Inputs above 12,000 characters and results above 64,000 characters are rejected. Physical iPhone acceptance remains unverified.
+When prompted, open the Shortcuts link from Obsidian and permit the shortcut to return its output. On Mac, the output permission appears in Apple's separate shortcut runner, not necessarily in the main Shortcuts editor. A request waiting for either prompt can time out.
+
+Gateway sends the explicit request through Apple's supported x-callback URL and accepts one bounded response for an unpredictable request token in the requesting vault. Native URL parameters use percent-encoded spaces. Obsidian consumes the routing `vault` parameter, so the callback checks the receiving app’s actual vault name. A whole JSON code fence from Use Model is accepted; extra prose and malformed JSON are rejected. Cancel, error, timeout, unload, invalid JSON and schema errors fail explicitly. A foreground handoff never starts a backup on failure, preventing duplicate requests. Keep Obsidian running; these are not durable jobs. Inputs above 12,000 characters and results above 64,000 characters are rejected. Physical iPhone acceptance remains unverified.
 
 ## Settings and ownership
 
@@ -49,7 +53,7 @@ The UI uses native controls, labelled selectors, focus restoration and plugin-sc
 - `features.appleIntelligence` stays false for the retired TishOS bridge; `features.appleShortcuts` reports availability of the handoff implementation on Apple platforms, not model readiness.
 - Durable job IDs fail before provider execution. No polling, synced mailbox, fallback writer, startup inference or note mutation.
 
-Subscription processes use argument arrays without a shell, a temporary working directory outside the vault, bounded output and a terminating timeout. Dedicated policy profiles disable built-in tools, extensions/hooks and project context for Gemini; Grok uses a known built-in allowlist followed by denial of that tool, denial of subagents and MCP operations, and a dedicated profile without user plugins. Account tools retain their own authentication and session data under `~/Library/Application Support/TPS AI Gateway/<provider>`; this is private local application state, never a vault record. Subprocesses are stopped when Gateway unloads. Provider errors do not expose raw CLI stderr, prompts or login data. The plugin itself has no access to CLI credentials.
+Subscription processes use argument arrays without a shell, a temporary working directory outside the vault, bounded output and a terminating timeout. Dedicated policy profiles disable built-in tools, extensions/hooks and project context for Gemini; Grok uses a known built-in allowlist followed by denial of that tool, denial of subagents and MCP operations, and a dedicated profile without user plugins. Account tools retain their own authentication and session data under `~/Library/Application Support/TPS AI Gateway/<provider>`; this is private local application state, never a vault record. Gemini policy uses the supported isolated user settings file (`.gemini/settings.json`), preserving unrelated CLI preferences and private login files. It does not override root-owned system policy files. Subprocesses are stopped when Gateway unloads. Provider errors do not expose raw CLI stderr, prompts or login data. The plugin itself has no access to CLI credentials.
 
 ## Development
 

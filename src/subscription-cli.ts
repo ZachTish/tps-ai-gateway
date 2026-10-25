@@ -15,8 +15,6 @@ export function cliEnvironment(provider: SubscriptionProvider, profile: string, 
   for (const key of ["HOME", "USERPROFILE", "PATH", "TMPDIR", "TEMP", "LANG", "SystemRoot"]) if (base[key]) env[key] = base[key]!;
   env[provider === "gemini-cli" ? "GEMINI_CLI_HOME" : "GROK_HOME"] = profile;
   if (provider === "gemini-cli") {
-    env.GEMINI_CLI_SYSTEM_SETTINGS_PATH = `${profile}/gateway-settings.json`;
-    env.GEMINI_CLI_SYSTEM_DEFAULTS_PATH = `${profile}/gateway-settings.json`;
     env.GEMINI_CLI_SURFACE = "tps-ai-gateway";
     env.GEMINI_TELEMETRY_ENABLED = "false";
   } else {
@@ -98,10 +96,33 @@ async function profileFor(provider: SubscriptionProvider): Promise<string> {
   const { fs, path, os } = node();
   const root = path.join(os.homedir(), "Library", "Application Support", "TPS AI Gateway", provider);
   await fs.mkdir(root, { recursive: true, mode: 0o700 });
-  // Only plugin-owned policy files are written. The CLI's login and state are untouched.
-  await fs.writeFile(path.join(root, provider === "gemini-cli" ? "gateway-settings.json" : "config.toml"),
-    provider === "gemini-cli" ? JSON.stringify(GEMINI_PROFILE_SETTINGS) : GROK_PROFILE_SETTINGS, { mode: 0o600 });
+  // Gemini rejects user-owned system settings. Its isolated user profile is the
+  // supported location; leave enterprise system settings and CLI login files alone.
+  if (provider === "gemini-cli") await writeGeminiProfileSettings(root);
+  else await fs.writeFile(path.join(root, "config.toml"), GROK_PROFILE_SETTINGS, { mode: 0o600 });
   return root;
+}
+
+export async function writeGeminiProfileSettings(root: string): Promise<void> {
+  const { fs, path } = node();
+  const directory = path.join(root, ".gemini");
+  const file = path.join(directory, "settings.json");
+  await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+  let existing: Record<string, unknown> = {};
+  try {
+    existing = JSON.parse(await fs.readFile(file, "utf8"));
+    if (!existing || Array.isArray(existing) || typeof existing !== "object") throw new Error("Invalid settings");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error("The dedicated Gemini settings could not be read. Check the profile before connecting.");
+  }
+  const merge = (current: any, policy: any): any => {
+    if (!policy || typeof policy !== "object" || Array.isArray(policy)) return policy;
+    const result = { ...(current && typeof current === "object" && !Array.isArray(current) ? current : {}) };
+    for (const [key, value] of Object.entries(policy)) result[key] = merge(result[key], value);
+    return result;
+  };
+  const settings = merge(existing, GEMINI_PROFILE_SETTINGS);
+  if (JSON.stringify(existing) !== JSON.stringify(settings)) await fs.writeFile(file, JSON.stringify(settings, null, 2) + "\n", { mode: 0o600 });
 }
 
 let cancellationGeneration = 0;
