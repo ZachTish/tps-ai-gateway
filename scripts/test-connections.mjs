@@ -62,6 +62,30 @@ test('CLI envelopes are parsed without exposing error payloads',()=>{
  assert.equal(cli.parseCliResponse('grok-cli','{"text":"{\\"ok\\":true}"}'),'{"ok":true}');
  for(const input of ['garbage','{"error":"secret"}','{}'])assert.throws(()=>cli.parseCliResponse('gemini-cli',input),e=>!e.message.includes('secret'));
 });
+test('Grok request files use its text protocol, preserve the prompt and are removed after execution', {skip:process.platform!=='darwin'},async()=>{
+ const root=await mkdtemp(join(tmpdir(),'tps-grok-protocol-'));
+ const originalRequire=globalThis.require;
+ const nativeOs=originalRequire('os');
+ try {
+  // Keep this contract test's CLI policy, synthetic login and request files isolated.
+  globalThis.require=name=>name==='os'?{...nativeOs,homedir:()=>root,tmpdir:()=>root}:originalRequire(name);
+  const profile=join(root,'Library','Application Support','TPS AI Gateway','grok-cli');
+  await mkdir(profile,{recursive:true});const auth=join(profile,'auth.json');await writeFile(auth,'synthetic login state');
+  const executable=join(root,'grok');
+  await writeFile(executable,`#!${process.execPath}\nconst fs=require('fs'),path=require('path');
+const file=process.argv[process.argv.indexOf('--prompt-file')+1];
+const content=fs.readFileSync(file,'utf8');
+// Official Grok from_file selects ACP blocks for .json; other extensions are text.
+if(path.extname(file)==='.json' && JSON.parse(content).type!=='acp')process.exit(1);
+const request=JSON.parse(content);
+process.stdout.write(JSON.stringify({text:JSON.stringify({messages:request.messages,schema:request.schema,mode:fs.statSync(file).mode&511,file})}));\n`,{mode:0o700});
+  const response=await cli.callSubscription('grok-cli',{...DEFAULT_SETTINGS,grokCliPath:executable},messages,schema);
+  const data=JSON.parse(response.text);
+  assert.deepEqual(data.messages,messages);assert.deepEqual(data.schema,schema);assert.equal(data.mode,0o600);
+  await assert.rejects(stat(data.file),{code:'ENOENT'});
+  assert.equal(await readFile(auth,'utf8'),'synthetic login state');
+ } finally { globalThis.require=originalRequire;await rm(root,{recursive:true,force:true}); }
+});
 test('subprocess input stays literal; output limit, deadline, failures and cancellation terminate work',async()=>{
  const env=Object.fromEntries(Object.entries(process.env).filter(([k])=>['PATH','HOME','TMPDIR'].includes(k)));
  const options={cwd:tmpdir(),env,timeoutMs:2000};

@@ -196,7 +196,8 @@ export async function callSubscription(provider: SubscriptionProvider, settings:
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "tps-ai-request-"));
   try {
     const prompt = structuredPrompt(messages, schema);
-    const promptFile = path.join(cwd, "request.json");
+    // Grok treats .json files as ACP content blocks. This envelope is prompt text.
+    const promptFile = path.join(cwd, "request.txt");
     if (provider === "grok-cli") await fs.writeFile(promptFile, prompt, { mode: 0o600 });
     assertActive();
     const model = provider === "gemini-cli" ? settings.geminiCliModel : settings.grokCliModel;

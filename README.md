@@ -9,7 +9,7 @@ Open **Settings → TPS AI Gateway**. Choose a provider, follow its connection s
 | Choice | Connection | Platforms / limits |
 | --- | --- | --- |
 | Gemini Code Assist · Eligible work account | Official Gemini CLI 0.65.0+; Connect opens Google sign-in in Terminal | macOS. Requires an eligible Code Assist work account. Personal Google AI Pro/Ultra subscriptions no longer work with this CLI. |
-| Grok subscription | Current official Grok Build; Connect opens its login in Terminal | macOS. Requires Grok Build access on the account. Text only; adapter's authenticated end-to-end acceptance remains unverified. |
+| Grok subscription | Current official Grok Build; Connect opens its login in Terminal | macOS. Requires Grok Build access on the account. Text only. |
 | Apple Intelligence · Shortcuts | A user-owned shortcut using Apple's **Use Model** action | Supported Mac/iPhone/iPad with Apple Intelligence enabled. Foreground handoff; text only. |
 | Local / open models · Ollama | Existing Ollama server and installed model | Localhost means the current device. Mobile requires a secured reachable server. |
 | Other provider · Compatible API | Provider's API base URL, model ID, optional device-local secret | Chat Completions endpoints, including local servers. HTTPS required except localhost. JSON is requested in the prompt and validated on return. |
@@ -54,6 +54,8 @@ The UI uses native controls, labelled selectors, focus restoration and plugin-sc
 - Durable job IDs fail before provider execution. No polling, synced mailbox, fallback writer, startup inference or note mutation.
 
 Subscription processes use argument arrays without a shell, a temporary working directory outside the vault, bounded output and a terminating timeout. Dedicated policy profiles disable built-in tools, extensions/hooks and project context for Gemini; Grok uses a known built-in allowlist followed by denial of that tool, denial of subagents and MCP operations, and a dedicated profile without user plugins. Account tools retain their own authentication and session data under `~/Library/Application Support/TPS AI Gateway/<provider>`; this is private local application state, never a vault record. Gemini policy uses the supported isolated user settings file (`.gemini/settings.json`), preserving unrelated CLI preferences and private login files. It does not override root-owned system policy files. Subprocesses are stopped when Gateway unloads. Provider errors do not expose raw CLI stderr, prompts or login data. The plugin itself has no access to CLI credentials.
+
+Grok receives the structured request as a private temporary text file. Its `.json` prompt-file mode is reserved for ACP message blocks and must not be used for this plain prompt envelope. The file is removed when execution completes or fails; prompts are never command-line arguments.
 
 ## Development
 
